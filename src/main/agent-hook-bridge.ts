@@ -24,7 +24,51 @@ import { SurfaceId } from '../shared/types';
 import { reportAgent, ReportAgentParams } from './agent-state';
 
 /** The hook events wmux registers. */
-export type ClaudeHookEvent = 'PostToolUse' | 'Notification' | 'Stop' | 'SubagentStop';
+export type ClaudeHookEvent =
+  | 'UserPromptSubmit'
+  | 'PostToolUse'
+  | 'Notification'
+  | 'Stop'
+  | 'SubagentStop';
+
+const KNOWN_HOOK_EVENTS: ClaudeHookEvent[] = [
+  'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
+];
+
+/**
+ * Which event a `hook.event` wire payload denotes, or null for one outside the model.
+ *
+ * This exists because the payload does not always say. `wmux-hook.js` is invoked
+ * two ways (see its usage block): `--event <Event>` for the lifecycle hooks, and
+ * a bare `<tool-name>` for PostToolUse — and the bare form sends `{ tool }` with
+ * NO `event` field. Reading `params.event` directly therefore admitted
+ * Notification, Stop and SubagentStop while silently dropping every PostToolUse.
+ *
+ * That one omission disabled the only signal that ever declares `working`. A
+ * pane never reported a run, so the sidebar fell back to the scraping heuristic
+ * this module exists to replace — showing a busy pane as idle, and a finished
+ * one as still running. Worse, PostToolUse is also what clears `blocked` the
+ * moment the agent resumes work, so answering a permission prompt left "needs
+ * you" stuck on the pane until the turn ended.
+ *
+ * Resolved here rather than by teaching the hook helper to send `event`: hooks
+ * are written into settings.json once at install, so the bare-tool form is
+ * already out in every existing config and will keep arriving from helper
+ * vintages this build does not control. The main process is the single place
+ * that sees every payload regardless of who produced it.
+ */
+export function hookEventName(
+  params: { event?: unknown; tool?: unknown } | null | undefined,
+): ClaudeHookEvent | null {
+  const explicit = typeof params?.event === 'string' ? params.event.trim() : '';
+  if (explicit) {
+    return KNOWN_HOOK_EVENTS.includes(explicit as ClaudeHookEvent) ? (explicit as ClaudeHookEvent) : null;
+  }
+  // No event named, but a tool did run — that is PostToolUse by construction,
+  // since it is the only hook wmux registers that reports a tool.
+  const tool = typeof params?.tool === 'string' ? params.tool.trim() : '';
+  return tool ? 'PostToolUse' : null;
+}
 
 /**
  * Map one Claude Code hook event to a report_agent payload, or null to ignore it.
@@ -34,6 +78,22 @@ export function hookToAgentReport(
   message: string | null,
 ): ReportAgentParams | null {
   switch (event) {
+    // The user pressed Enter: a turn has STARTED.
+    //
+    // Without this wmux had no turn-start signal at all — the earliest thing it
+    // ever heard was PostToolUse, which fires when a tool FINISHES. So the
+    // stretch between submitting a prompt and the first completed tool declared
+    // nothing, and a pane that was very much thinking read `idle`. For a turn
+    // that answers in prose and calls no tool, NOTHING was ever declared and the
+    // pane stayed idle from start to end.
+    //
+    // Absolute runDepth, matching PostToolUse: this is "a turn is in flight",
+    // an idempotent statement, not an increment. Submitting a prompt also means
+    // the user is plainly not parked on a prompt any more, so it clears
+    // `blocked` — they just answered it, by typing.
+    case 'UserPromptSubmit':
+      return { awaitingHuman: false, runDepth: 1 };
+
     // Claude Code wants the user. This fires both for permission/question
     // prompts and for the ~60s "still waiting on you" idle nudge, and we park
     // the pane for both: in either case the agent genuinely is waiting on a
@@ -84,8 +144,7 @@ export function applyHookToAgentState(
   event: string,
   message: string | null,
 ): void {
-  const known: ClaudeHookEvent[] = ['PostToolUse', 'Notification', 'Stop', 'SubagentStop'];
-  if (!known.includes(event as ClaudeHookEvent)) return;
+  if (!KNOWN_HOOK_EVENTS.includes(event as ClaudeHookEvent)) return;
 
   const params = hookToAgentReport(event as ClaudeHookEvent, message);
   if (!params) return;

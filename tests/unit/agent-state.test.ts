@@ -12,6 +12,7 @@ import {
   reportAgentSession,
   reportMetadata,
   releaseAgent,
+  interruptAgent,
   getAgentState,
   listAgentStates,
   listBlocked,
@@ -253,5 +254,57 @@ describe('broadcast', () => {
     sendMock.mockClear();
     reportAgent(surf, { seq: 2, runDelta: 1 });
     expect(sendMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('interruptAgent — the human pressed Escape (no hook exists for it)', () => {
+  const s = 'surf-esc-1' as SurfaceId;
+
+  it('retracts a run that was interrupted mid-flight', () => {
+    reportAgent(s, { runDepth: 1 });
+    expect(getAgentState(s)?.state).toBe('working');
+    expect(interruptAgent(s)).toBe(true);
+    expect(getAgentState(s)).toMatchObject({ state: 'idle', runDepth: 0 });
+  });
+
+  it('retracts a permission prompt that was escaped, and disarms its buttons', () => {
+    reportAgent(s, {
+      awaitingHuman: true,
+      reason: 'permission: Bash',
+      choices: [{ id: 'y', label: 'Yes', key: '1' }],
+    });
+    expect(getAgentState(s)?.state).toBe('blocked');
+    expect(interruptAgent(s)).toBe(true);
+    expect(getAgentState(s)).toMatchObject({ state: 'idle', blockedReason: null, choices: [] });
+  });
+
+  // Bound 1: a pane that never declared anything is not wmux's business.
+  // Escape in a plain shell means whatever the shell says it means.
+  it('ignores a pane that has declared nothing', () => {
+    expect(interruptAgent('surf-esc-never-reported' as SurfaceId)).toBe(false);
+    expect(getAgentState('surf-esc-never-reported' as SurfaceId)).toBeUndefined();
+  });
+
+  // Bound 2: only the two states where Escape's meaning is unambiguous.
+  it('is a no-op on an already-idle pane', () => {
+    reportAgent(s, { runDepth: 0 });
+    expect(interruptAgent(s)).toBe(false);
+    expect(getAgentState(s)?.state).toBe('idle');
+  });
+
+  // Bound 3: it only ever clears. A later report is still believed, so a wrong
+  // guess costs one tool call — it cannot strand the pane in the wrong state.
+  it('does not stop the agent re-asserting itself afterwards', () => {
+    reportAgent(s, { runDepth: 1 });
+    interruptAgent(s);
+    reportAgent(s, { awaitingHuman: false, runDepth: 1 });
+    expect(getAgentState(s)?.state).toBe('working');
+  });
+
+  it('a real block that survives the escape comes straight back', () => {
+    reportAgent(s, { awaitingHuman: true, reason: 'still asking' });
+    interruptAgent(s);
+    reportAgent(s, { awaitingHuman: true, reason: 'still asking' });
+    expect(getAgentState(s)).toMatchObject({ state: 'blocked', blockedReason: 'still asking' });
   });
 });

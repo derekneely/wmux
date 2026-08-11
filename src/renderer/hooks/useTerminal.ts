@@ -675,6 +675,20 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       // (issue #146). Routed through terminal.input (→ onData) rather than
       // pty.write so broadcast-input fans a remapped key out like any other.
       if (applyKeyRemap(event, (data) => terminal.input(data, true))) return false;
+
+      // Escape is the one interrupt wmux can observe. Claude Code fires no hook
+      // when you cancel — a run stopped with Esc, and a permission prompt
+      // escaped, both leave the declared state asserting `working`/`blocked`
+      // for a turn that is over. Reporting the keypress lets main retract it.
+      //
+      // Deliberately does NOT consume the event: this only tells main what the
+      // user did, and the Escape must still reach the PTY to do its actual job.
+      // Main ignores it for any pane that has declared nothing, so a plain
+      // shell is unaffected — see interruptAgent in src/main/agent-state.ts.
+      if (event.type === 'keydown' && event.key === 'Escape') {
+        window.wmux?.agentState?.interrupt?.(surfaceId);
+      }
+
       if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
         // ConPTY pads lines to full width with real spaces — trim them or
         // pasted blocks carry ragged trailing whitespace (issue #102).

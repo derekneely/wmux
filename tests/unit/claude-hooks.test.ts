@@ -68,3 +68,43 @@ describe('applyWmuxHooks (issue #53)', () => {
     expect(twice.hooks.SubagentStop).toHaveLength(1);
   });
 });
+
+describe('PostToolUse catch-all — state must not ride on the label allowlist', () => {
+  const catchAll = (out: any) =>
+    out.hooks.PostToolUse.find((e: any) =>
+      (e.hooks || []).some((h: any) => h.command.includes('--event PostToolUse')));
+
+  it('installs an entry covering every tool, not just the tracked ten', () => {
+    expect(catchAll(applyWmuxHooks({}, HOOK))).toBeDefined();
+  });
+
+  it('carries NO matcher key — matchers are regex, so "*" would never match', () => {
+    // The subtle one. A matcher of "*" reads as a wildcard and is in fact an
+    // invalid pattern (nothing to repeat); the hook would silently never fire
+    // and the pane would sit on "Needs you" exactly as before. Omitting the
+    // matcher is the documented way to apply a hook to every tool.
+    const entry = catchAll(applyWmuxHooks({}, HOOK));
+    expect('matcher' in entry).toBe(false);
+  });
+
+  it('AskUserQuestion is covered by it, and is NOT in the labelled list', () => {
+    const out = applyWmuxHooks({}, HOOK);
+    const labelled = out.hooks.PostToolUse.filter((e: any) => e.matcher).map((e: any) => e.matcher);
+    // The gap that stranded "Needs you": answering a question is exactly when
+    // the block should lift, and this tool never had an entry of its own.
+    expect(labelled).not.toContain('AskUserQuestion');
+    expect(catchAll(out)).toBeDefined();
+  });
+
+  it('re-applying does not accumulate duplicates', () => {
+    const once = applyWmuxHooks({}, HOOK);
+    const twice = applyWmuxHooks(once, HOOK);
+    expect(twice.hooks.PostToolUse.length).toBe(once.hooks.PostToolUse.length);
+  });
+
+  it('removeWmuxHooks takes it back out again', async () => {
+    const { removeWmuxHooks } = await import('../../src/main/claude-context');
+    const stripped = removeWmuxHooks(applyWmuxHooks({ hooks: {} }, HOOK));
+    expect(stripped.hooks?.PostToolUse).toBeUndefined();
+  });
+});

@@ -4,7 +4,7 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }));
 
-import { hookToAgentReport, applyHookToAgentState } from '../../src/main/agent-hook-bridge';
+import { hookToAgentReport, applyHookToAgentState, hookEventName } from '../../src/main/agent-hook-bridge';
 import { getAgentState, resetAgentState } from '../../src/main/agent-state';
 import { SurfaceId } from '../../src/shared/types';
 
@@ -35,6 +35,35 @@ describe('hookToAgentReport', () => {
 
   it('Stop is decisive: nothing running, nothing waiting', () => {
     expect(hookToAgentReport('Stop', null)).toEqual({ awaitingHuman: false, runDepth: 0 });
+  });
+});
+
+describe('hookEventName', () => {
+  // The regression this exists to stop: `wmux-hook.js` is invoked two ways, and
+  // only one of them sends an `event` field. Gating on `params.event` therefore
+  // admitted three of the four hooks and dropped every PostToolUse — the ONLY
+  // event that ever declares `working`, and the one that clears `blocked` when
+  // the agent resumes after an answer.
+  it('reads PostToolUse off a bare tool payload, which carries no event field', () => {
+    expect(hookEventName({ tool: 'Bash' })).toBe('PostToolUse');
+    expect(hookEventName({ tool: 'Edit', file: 'a.ts' })).toBe('PostToolUse');
+    // `wmux-hook.js` defaults an unnamed tool to this rather than sending none.
+    expect(hookEventName({ tool: 'unknown' })).toBe('PostToolUse');
+  });
+
+  it('an explicit event wins over any tool name riding along with it', () => {
+    expect(hookEventName({ event: 'Stop', tool: 'Bash' })).toBe('Stop');
+    expect(hookEventName({ event: 'Notification' })).toBe('Notification');
+    expect(hookEventName({ event: 'SubagentStop' })).toBe('SubagentStop');
+  });
+
+  it('names nothing for payloads outside the model', () => {
+    expect(hookEventName({ event: 'SessionStart' })).toBeNull();
+    expect(hookEventName({})).toBeNull();
+    expect(hookEventName(null)).toBeNull();
+    // Whitespace is not a tool name; treating it as one would assert a run for
+    // a payload that named nothing.
+    expect(hookEventName({ tool: '   ' })).toBeNull();
   });
 });
 
@@ -80,5 +109,40 @@ describe('applyHookToAgentState', () => {
     // clamp is what keeps a second one from going negative.
     applyHookToAgentState(surf, 'SubagentStop', null);
     expect(getAgentState(surf)?.runDepth).toBe(0);
+  });
+});
+
+describe('UserPromptSubmit — the turn-start signal', () => {
+  // The gap this closes: wmux registered four hooks and none of them fired when
+  // a turn BEGAN. PostToolUse fires when a tool FINISHES, so everything before
+  // the first completed tool declared nothing and the pane read `idle` while it
+  // was thinking. A prose-only turn declared nothing at all, start to end.
+  it('declares a run the moment the user submits', () => {
+    expect(hookToAgentReport('UserPromptSubmit', null)).toEqual({ awaitingHuman: false, runDepth: 1 });
+  });
+
+  it('a turn that never calls a tool is still working from Enter to Stop', () => {
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    expect(getAgentState(surf)?.state).toBe('working');
+    applyHookToAgentState(surf, 'Stop', null);
+    expect(getAgentState(surf)?.state).toBe('idle');
+  });
+
+  it('submitting a prompt clears a block — the user just answered it by typing', () => {
+    applyHookToAgentState(surf, 'Notification', 'permission to use Bash');
+    expect(getAgentState(surf)?.state).toBe('blocked');
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    expect(getAgentState(surf)).toMatchObject({ state: 'working', blockedReason: null });
+  });
+
+  it('is idempotent with the PostToolUse that follows it', () => {
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    applyHookToAgentState(surf, 'PostToolUse', null);
+    applyHookToAgentState(surf, 'PostToolUse', null);
+    expect(getAgentState(surf)?.runDepth).toBe(1);
+  });
+
+  it('is resolved from the wire payload like any other named event', () => {
+    expect(hookEventName({ event: 'UserPromptSubmit' })).toBe('UserPromptSubmit');
   });
 });
