@@ -3,9 +3,11 @@
  *
  * The protocol in agent-state.ts is agent-agnostic: anything that can write a
  * line of JSON to the wmux pipe can drive it. But Claude Code is what most wmux
- * panes actually run, and wmux ALREADY configures four of its hooks in
+ * panes actually run, and wmux ALREADY configures its hooks in
  * ~/.claude/settings.json (see ensureClaudeHooks in claude-context.ts):
  *
+ *   SessionStart  — a TUI is up in this pane and has done nothing yet
+ *   UserPromptSubmit — the user pressed Enter; a turn has started
  *   PostToolUse   — a tool just finished running
  *   Notification  — Claude Code wants the user's attention
  *   Stop          — the turn is over
@@ -25,6 +27,7 @@ import { reportAgent, ReportAgentParams } from './agent-state';
 
 /** The hook events wmux registers. */
 export type ClaudeHookEvent =
+  | 'SessionStart'
   | 'UserPromptSubmit'
   | 'PostToolUse'
   | 'Notification'
@@ -32,7 +35,7 @@ export type ClaudeHookEvent =
   | 'SubagentStop';
 
 const KNOWN_HOOK_EVENTS: ClaudeHookEvent[] = [
-  'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
+  'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
 ];
 
 /**
@@ -78,6 +81,27 @@ export function hookToAgentReport(
   message: string | null,
 ): ReportAgentParams | null {
   switch (event) {
+    // An agent TUI just came up in this pane, and has done nothing yet.
+    //
+    // The only event here that declares the ABSENCE of work, and the only one
+    // that fires before the user has interacted at all. It exists because
+    // launching `claude` occupies the shell with a foreground process, so shell
+    // integration reports `running` immediately; with no declared state to
+    // consult, the sidebar's status chain fell through to that and showed
+    // "Running" for a pane parked on an empty prompt.
+    //
+    // runDepth 0 rather than a no-op report: the value of this event is the
+    // session entry it creates, not the depth it sets. `claudeIsIdle` is gated
+    // on `sessions.length > 0`, so a pane that has declared NOTHING and a pane
+    // that has declared itself idle are different facts, and only the second one
+    // can outrank the shell.
+    //
+    // Safe on a resumed session (`--continue`, `/clear`) even though those also
+    // fire SessionStart: it clears rather than asserts, and the next hook of any
+    // kind re-declares the truth.
+    case 'SessionStart':
+      return { awaitingHuman: false, runDepth: 0 };
+
     // The user pressed Enter: a turn has STARTED.
     //
     // Without this wmux had no turn-start signal at all — the earliest thing it

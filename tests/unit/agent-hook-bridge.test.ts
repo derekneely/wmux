@@ -58,7 +58,9 @@ describe('hookEventName', () => {
   });
 
   it('names nothing for payloads outside the model', () => {
-    expect(hookEventName({ event: 'SessionStart' })).toBeNull();
+    // A real Claude Code hook that wmux does not register — the model is an
+    // allowlist, not a passthrough.
+    expect(hookEventName({ event: 'PreCompact' })).toBeNull();
     expect(hookEventName({})).toBeNull();
     expect(hookEventName(null)).toBeNull();
     // Whitespace is not a tool name; treating it as one would assert a run for
@@ -69,7 +71,7 @@ describe('hookEventName', () => {
 
 describe('applyHookToAgentState', () => {
   it('ignores hook events that are not part of the model', () => {
-    applyHookToAgentState(surf, 'SessionStart', null);
+    applyHookToAgentState(surf, 'PreCompact', null);
     expect(getAgentState(surf)).toBeUndefined();
   });
 
@@ -144,5 +146,45 @@ describe('UserPromptSubmit — the turn-start signal', () => {
 
   it('is resolved from the wire payload like any other named event', () => {
     expect(hookEventName({ event: 'UserPromptSubmit' })).toBe('UserPromptSubmit');
+  });
+});
+
+describe('SessionStart — the launch signal', () => {
+  // The gap this closes: launching `claude` occupies the shell with a foreground
+  // process, so shell integration reports `running` immediately. Nothing
+  // Claude-derived had anything to say between launch and the first prompt, so
+  // the sidebar fell through to the shell and a pane sitting at an empty prompt
+  // read "Running". UserPromptSubmit was still one whole user action too late.
+  it('declares idle, not working — a TUI that just came up has done nothing', () => {
+    expect(hookToAgentReport('SessionStart', null)).toEqual({ awaitingHuman: false, runDepth: 0 });
+  });
+
+  it('creates a session entry, which is the fact the sidebar was missing', () => {
+    // Not merely "state is idle": before any hook fires, getAgentState is
+    // undefined, and `claudeIsIdle` is gated on there being a session at all.
+    // An undeclared pane and a pane declared idle are different facts, and only
+    // the second can outrank the shell's "running".
+    expect(getAgentState(surf)).toBeUndefined();
+    applyHookToAgentState(surf, 'SessionStart', null);
+    expect(getAgentState(surf)).toMatchObject({ state: 'idle', runDepth: 0 });
+  });
+
+  it('the first prompt still flips the pane to working', () => {
+    applyHookToAgentState(surf, 'SessionStart', null);
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    expect(getAgentState(surf)?.state).toBe('working');
+  });
+
+  it('clears rather than asserts, so a resumed session cannot strand a stale block', () => {
+    // --continue and /clear both re-fire SessionStart on a surface that may
+    // still be carrying state from before.
+    applyHookToAgentState(surf, 'Notification', 'permission to use Bash');
+    expect(getAgentState(surf)?.state).toBe('blocked');
+    applyHookToAgentState(surf, 'SessionStart', null);
+    expect(getAgentState(surf)).toMatchObject({ state: 'idle', blockedReason: null });
+  });
+
+  it('is resolved from the wire payload', () => {
+    expect(hookEventName({ event: 'SessionStart' })).toBe('SessionStart');
   });
 });

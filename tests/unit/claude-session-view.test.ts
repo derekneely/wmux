@@ -183,4 +183,17 @@ describe('declared agent state precedence', () => {
     );
     expect(out.sessions[0].tool).toBeNull();
   });
+
+  it('a freshly launched TUI is a session, and an idle one', () => {
+    // What SessionStart buys: between `claude` starting and the first prompt,
+    // shell integration reports the pane `running` (a foreground process holds
+    // the shell), and nothing else had spoken. A pane with NO session falls
+    // through to that shell state and renders "Running"; a pane with one idle
+    // session is what lets `claudeIsIdle` outrank it. The distinction being
+    // asserted here is sessions.length, not just the state string.
+    const tree = leaf('pane-1', [{ id: 'surf-a' }]);
+    const out = claudeSessionsForWorkspace(tree, {}, {}, NOW, { 'surf-a': declared('idle') });
+    expect(out.sessions).toHaveLength(1);
+    expect(out).toMatchObject({ working: 0, blocked: 0 });
+  });
 });

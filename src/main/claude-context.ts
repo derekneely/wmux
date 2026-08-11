@@ -161,7 +161,7 @@ const stripWmux = (entries: any): any[] =>
 
 /** The hook arrays wmux installs into, and therefore the ones it may remove from. */
 const WMUX_HOOK_EVENTS = [
-  'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
+  'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
 ] as const;
 
 /**
@@ -204,6 +204,26 @@ export function applyWmuxHooks(settings: any, hookScript: string): any {
   // pass an --event flag so the helper reports an event type instead.
   const makeToolCmd = (tool: string) => `node "${hookScript}" ${tool} 2>/dev/null || true`;
   const makeEventCmd = (event: string) => `node "${hookScript}" --event ${event} 2>/dev/null || true`;
+
+  // SessionStart — an agent TUI is now up in this pane, and has done nothing.
+  //
+  // Every other hook here reports work. This one reports the ABSENCE of it, and
+  // that is the point: launching `claude` puts a foreground process on the shell
+  // that never returns until the TUI exits, so shell integration reports
+  // `running` from the moment you press Enter on the command. Until this hook
+  // existed, nothing Claude-derived had anything to say during the stretch
+  // between launch and the first prompt — `claudeIsIdle` is gated on
+  // `sessions.length > 0` and there was no session yet — so the status chain
+  // fell through to the shell and a pane sitting at an empty prompt read
+  // "Running".
+  //
+  // Declaring idle here is what makes that window representable at all: it
+  // creates the session entry, which is the thing the rest of the chain keys
+  // off. UserPromptSubmit flips it to working on the first real prompt.
+  next.hooks.SessionStart = [
+    ...stripWmux(next.hooks.SessionStart),
+    { hooks: [{ type: 'command', command: makeEventCmd('SessionStart') }] },
+  ];
 
   // UserPromptSubmit — the turn STARTED. The only signal that arrives before a
   // tool has finished, and therefore the only thing that can tell a pane which

@@ -108,3 +108,32 @@ describe('PostToolUse catch-all — state must not ride on the label allowlist',
     expect(stripped.hooks?.PostToolUse).toBeUndefined();
   });
 });
+
+describe('SessionStart — the pane is running an agent, not a command', () => {
+  it('is installed, with the --event form', () => {
+    expect(wmuxCmds(applyWmuxHooks({}, HOOK).hooks.SessionStart)).toEqual([
+      `node "${HOOK}" --event SessionStart 2>/dev/null || true`,
+    ]);
+  });
+
+  it('preserves a user SessionStart hook alongside it', () => {
+    const userOwn = { hooks: [{ type: 'command', command: 'my-session-start.sh' }] };
+    const out = applyWmuxHooks({ hooks: { SessionStart: [userOwn] } }, HOOK);
+    expect(wmuxCmds(out.hooks.SessionStart)).toContain('my-session-start.sh');
+    expect(wmuxCmds(out.hooks.SessionStart).some((c) => c.includes('--event SessionStart'))).toBe(true);
+  });
+
+  it('re-applying does not accumulate duplicates', () => {
+    const once = applyWmuxHooks({}, HOOK);
+    expect(applyWmuxHooks(once, HOOK).hooks.SessionStart).toHaveLength(1);
+  });
+
+  it('removeWmuxHooks takes it back out again', async () => {
+    // The uninstall path is enumerated from WMUX_HOOK_EVENTS, so a hook added to
+    // the install side and forgotten on the list would be left behind forever
+    // after declining the integration (issue #132).
+    const { removeWmuxHooks } = await import('../../src/main/claude-context');
+    const stripped = removeWmuxHooks(applyWmuxHooks({ hooks: {} }, HOOK));
+    expect(stripped.hooks?.SessionStart).toBeUndefined();
+  });
+});
