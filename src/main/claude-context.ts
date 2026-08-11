@@ -160,7 +160,9 @@ const stripWmux = (entries: any): any[] =>
   });
 
 /** The hook arrays wmux installs into, and therefore the ones it may remove from. */
-const WMUX_HOOK_EVENTS = ['PostToolUse', 'Notification', 'Stop', 'SubagentStop'] as const;
+const WMUX_HOOK_EVENTS = [
+  'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop',
+] as const;
 
 /**
  * Inverse of {@link applyWmuxHooks}: returns a settings object with every wmux
@@ -203,6 +205,14 @@ export function applyWmuxHooks(settings: any, hookScript: string): any {
   const makeToolCmd = (tool: string) => `node "${hookScript}" ${tool} 2>/dev/null || true`;
   const makeEventCmd = (event: string) => `node "${hookScript}" --event ${event} 2>/dev/null || true`;
 
+  // UserPromptSubmit — the turn STARTED. The only signal that arrives before a
+  // tool has finished, and therefore the only thing that can tell a pane which
+  // is thinking apart from one that is genuinely idle.
+  next.hooks.UserPromptSubmit = [
+    ...stripWmux(next.hooks.UserPromptSubmit),
+    { hooks: [{ type: 'command', command: makeEventCmd('UserPromptSubmit') }] },
+  ];
+
   // PostToolUse — one entry per tracked tool for specific sidebar tracking.
   next.hooks.PostToolUse = [
     ...stripWmux(next.hooks.PostToolUse),
@@ -211,6 +221,27 @@ export function applyWmuxHooks(settings: any, hookScript: string): any {
       hooks: [{ type: 'command', command: makeToolCmd(tool) }],
     })),
   ];
+
+  // …and a catch-all for every OTHER tool.
+  //
+  // The list above exists to label what a pane is doing ("Reading file…"), and
+  // using it to gate STATE meant any tool outside it declared nothing at all.
+  // AskUserQuestion is the one that hurts: answering the prompt is precisely
+  // the moment `blocked` should lift, and it fired no hook, so the pane sat on
+  // "Needs you" until one of the ten happened to run. Same for TodoWrite, Task,
+  // and every MCP tool.
+  //
+  // The --event form carries no tool name, which is the point: it states the
+  // lifecycle fact (a tool ran, so a turn is live and nothing is parked on the
+  // user) without pretending to a label. Tracked tools match both entries; the
+  // report is idempotent, so that costs nothing.
+  // No `matcher` key, deliberately. Matchers are REGEX (or pipe-separated
+  // names), so the intuitive `"*"` is not a wildcard — it is an invalid pattern
+  // with nothing to repeat, and would silently never match. Omitting the
+  // matcher is the documented way to apply a hook to every tool.
+  next.hooks.PostToolUse.push({
+    hooks: [{ type: 'command', command: makeEventCmd('PostToolUse') }],
+  });
 
   // Notification — Claude Code is asking for input/permission (waiting on you).
   next.hooks.Notification = [

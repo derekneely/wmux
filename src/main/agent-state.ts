@@ -444,6 +444,56 @@ export function answerAgent(
 }
 
 /**
+ * The user pressed Escape in this pane — retract whatever was declared.
+ *
+ * Every other entry point here records something an AGENT said. This one
+ * records something the HUMAN did, and it exists because Claude Code fires no
+ * hook when you interrupt it. Measured directly: interrupting a run, and
+ * escaping a permission prompt, both leave `updatedAt` byte-identical — not a
+ * stale report re-delivered, but no report at all. So the pane keeps asserting
+ * `working`/`blocked` for a turn that ended, until the next prompt or the
+ * 15-minute trust window.
+ *
+ * wmux can see the keypress because it owns the terminal (useTerminal.ts hands
+ * every key to a custom handler before the PTY sees it). That is a better
+ * signal than scraping the TUI for an "Interrupted" line: it depends on no
+ * wording, so it cannot break silently when Claude Code rewords its output —
+ * the exact failure mode this module was written to avoid.
+ *
+ * The inference is narrow, and bounded three ways:
+ *
+ * 1. **Only a pane that has declared something is touched.** No record means no
+ *    claim to retract, so a plain shell — where Escape means whatever the shell
+ *    says it means — is left completely alone.
+ * 2. **Only `working` and `blocked` are acted on.** Those are precisely the two
+ *    states in which Escape's meaning in Claude Code is unambiguous: it is the
+ *    documented interrupt key mid-run, and it cancels a permission prompt. An
+ *    already-idle pane has nothing to retract.
+ * 3. **It only ever CLEARS.** This never asserts a run or a block, so the worst
+ *    a wrong guess can do is under-report — and it self-corrects on the next
+ *    hook, which is now every tool rather than a list of ten.
+ *
+ * Returns true when something was actually retracted.
+ */
+export function interruptAgent(surfaceId: SurfaceId): boolean {
+  const record = records.get(surfaceId);
+  if (!record) return false;
+
+  const state = resolveState(record, Date.now());
+  if (state !== 'working' && state !== 'blocked') return false;
+
+  record.awaitingHuman = false;
+  record.blockedReason = null;
+  record.runDepth = 0;
+  // The prompt these belonged to is gone; leaving them armed would offer
+  // buttons for a question nobody is asking any more.
+  record.choices = [];
+  record.answeredAt = null;
+  commit(record);
+  return true;
+}
+
+/**
  * `pane.release_agent` — the agent is deliberately letting go of the pane.
  * The record is removed entirely so the pane reads `unknown` rather than
  * lingering as a ghost `working`.

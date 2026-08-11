@@ -206,6 +206,12 @@ contextBridge.exposeInMainWorld('wmux', {
     // normal outcome the UI reports, not an exception.
     answer: (surfaceId: string, choiceId: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.AGENT_ANSWER, surfaceId, choiceId),
+    // The user hit Escape in this pane. Fire-and-forget: main decides whether
+    // there is anything to retract, and a pane with no declared state is a
+    // no-op rather than an error.
+    interrupt: (surfaceId: string): void => {
+      ipcRenderer.send(IPC_CHANNELS.AGENT_INTERRUPT, surfaceId);
+    },
   },
   orchestration: {
     onUpdate: (callback: (state: any) => void) => {

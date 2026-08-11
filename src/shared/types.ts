@@ -292,6 +292,8 @@ export const IPC_CHANNELS = {
   NOTIFICATION_JUMP: 'notification:jump',
   // Settings
   AGENT_ANSWER: 'agent:answer',
+  /** User pressed Escape in a pane — retract any declared agent state. */
+  AGENT_INTERRUPT: 'agent:interrupt',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
   SETTINGS_CHANGED: 'settings:changed',
