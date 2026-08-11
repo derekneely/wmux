@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IPC_CHANNELS, SurfaceId, WindowId, WorkspaceId, AgentId } from '../shared/types';
 import { observePtyData, clearActivity } from './claude-observer';
-import { clearAgentState } from './agent-state';
+import { clearAgentState, interruptAgent } from './agent-state';
 import { PtyManager } from './pty-manager';
 import { PtyLedger, reapOrphans } from './pty-ledger';
 import { getAppDataDir } from '../shared/instance';
@@ -369,6 +369,15 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       if (!handled) resolve({ ok: false, error: 'answer_agent not routed' });
     }),
   );
+
+  // Escape in a pane retracts whatever that pane declared. Claude Code fires no
+  // hook on interrupt, so without this a cancelled turn keeps asserting
+  // `working`/`blocked` until the next prompt. `send`, not `handle`: the
+  // renderer has nothing to do with the answer, and a pane with no declared
+  // state is a legitimate no-op. See interruptAgent for why this is safe.
+  ipcMain.on(IPC_CHANNELS.AGENT_INTERRUPT, (_event, surfaceId: string) => {
+    if (surfaceId) interruptAgent(surfaceId as SurfaceId);
+  });
 
   // Agent-integration consent (issue #132). Deliberately NOT routed through the
   // generic settings:set above: changing this decision has to reconcile the files
