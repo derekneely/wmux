@@ -4,37 +4,42 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }));
 
-import { hookToAgentReport, applyHookToAgentState, hookEventName } from '../../src/main/agent-hook-bridge';
+import {
+  hookToAgentReport,
+  applyHookToAgentState,
+  hookEventName,
+  resetHookBridge,
+  HookTurnContext,
+} from '../../src/main/agent-hook-bridge';
 import { getAgentState, resetAgentState } from '../../src/main/agent-state';
 import { SurfaceId } from '../../src/shared/types';
 
 const surf = 'surf-hook-1' as SurfaceId;
 
-beforeEach(() => resetAgentState());
+/** A turn in flight — the context every event but Notification ignores. */
+const IN_TURN: HookTurnContext = { runDepth: 1, turnStartTracked: true };
+
+beforeEach(() => {
+  resetAgentState();
+  resetHookBridge();
+});
 
 describe('hookToAgentReport', () => {
   it('Notification parks the pane on the user and keeps the message as the reason', () => {
-    expect(hookToAgentReport('Notification', 'Claude needs your permission to use Bash'))
+    expect(hookToAgentReport('Notification', 'Claude needs your permission to use Bash', IN_TURN))
       .toEqual({ awaitingHuman: true, reason: 'Claude needs your permission to use Bash' });
   });
 
-  it('the 60s idle nudge also counts as blocked', () => {
-    // Deliberate: the agent genuinely is waiting on the user. Text-sniffing to
-    // tell a nudge from a permission prompt would break on any rewording, and
-    // would fail in the dangerous direction.
-    expect(hookToAgentReport('Notification', 'Claude is waiting for your input')?.awaitingHuman).toBe(true);
-  });
-
   it('PostToolUse asserts a run and clears any block, idempotently', () => {
-    expect(hookToAgentReport('PostToolUse', null)).toEqual({ awaitingHuman: false, runDepth: 1 });
+    expect(hookToAgentReport('PostToolUse', null, IN_TURN)).toEqual({ awaitingHuman: false, runDepth: 1 });
   });
 
   it('SubagentStop decrements rather than clearing the run', () => {
-    expect(hookToAgentReport('SubagentStop', null)).toEqual({ runDelta: -1 });
+    expect(hookToAgentReport('SubagentStop', null, IN_TURN)).toEqual({ runDelta: -1 });
   });
 
   it('Stop is decisive: nothing running, nothing waiting', () => {
-    expect(hookToAgentReport('Stop', null)).toEqual({ awaitingHuman: false, runDepth: 0 });
+    expect(hookToAgentReport('Stop', null, IN_TURN)).toEqual({ awaitingHuman: false, runDepth: 0 });
   });
 });
 
@@ -118,7 +123,7 @@ describe('UserPromptSubmit — the turn-start signal', () => {
   // the first completed tool declared nothing and the pane read `idle` while it
   // was thinking. A prose-only turn declared nothing at all, start to end.
   it('declares a run the moment the user submits', () => {
-    expect(hookToAgentReport('UserPromptSubmit', null)).toEqual({ awaitingHuman: false, runDepth: 1 });
+    expect(hookToAgentReport('UserPromptSubmit', null, IN_TURN)).toEqual({ awaitingHuman: false, runDepth: 1 });
   });
 
   it('a turn that never calls a tool is still working from Enter to Stop', () => {
@@ -144,5 +149,67 @@ describe('UserPromptSubmit — the turn-start signal', () => {
 
   it('is resolved from the wire payload like any other named event', () => {
     expect(hookEventName({ event: 'UserPromptSubmit' })).toBe('UserPromptSubmit');
+  });
+});
+
+describe('Notification — the idle nudge is not a block', () => {
+  // The bug: Claude Code arms a ~60s "waiting for your input" nudge when a turn
+  // ends, and it fires whether or not anything is actually being asked. A pane
+  // that had just been /clear'd and left alone therefore lit up "Needs you" 60s
+  // after its last Stop, with an empty conversation and nothing to answer.
+  const nudge = 'Claude is waiting for your input';
+  const prompt = 'Claude needs your permission to use Bash';
+
+  it('ignores a Notification that arrives with the turn already over', () => {
+    expect(hookToAgentReport('Notification', nudge, { runDepth: 0, turnStartTracked: true })).toBeNull();
+  });
+
+  it('still blocks a Notification that arrives mid-turn — that is a real prompt', () => {
+    expect(hookToAgentReport('Notification', prompt, { runDepth: 1, turnStartTracked: true }))
+      .toEqual({ awaitingHuman: true, reason: prompt });
+  });
+
+  it('draws no distinction until UserPromptSubmit is known to fire', () => {
+    // A settings.json predating the UserPromptSubmit hook sits at runDepth 0
+    // through an entire turn. Concluding "idle nudge" from that would swallow
+    // real permission prompts — so the gate stays shut and both block.
+    expect(hookToAgentReport('Notification', prompt, { runDepth: 0, turnStartTracked: false })?.awaitingHuman)
+      .toBe(true);
+  });
+
+  it('a /clear\'d pane sitting idle does not start asking for attention', () => {
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    applyHookToAgentState(surf, 'Stop', null);
+    expect(getAgentState(surf)?.state).toBe('idle');
+
+    applyHookToAgentState(surf, 'Notification', nudge);
+    expect(getAgentState(surf)).toMatchObject({ state: 'idle', blockedReason: null });
+  });
+
+  it('a permission prompt inside a live turn still parks the pane', () => {
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    applyHookToAgentState(surf, 'Notification', prompt);
+    expect(getAgentState(surf)).toMatchObject({ state: 'blocked', blockedReason: prompt });
+  });
+
+  it('a prompt on the very first turn of a pane is not mistaken for a nudge', () => {
+    // What made the flag global rather than per-surface: this pane has never
+    // submitted a prompt, but another one has, so the hook is known to fire and
+    // this pane's own runDepth 1 is trustworthy.
+    const other = 'surf-hook-2' as SurfaceId;
+    applyHookToAgentState(other, 'UserPromptSubmit', null);
+
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    applyHookToAgentState(surf, 'Notification', prompt);
+    expect(getAgentState(surf)?.state).toBe('blocked');
+  });
+
+  it('a nudge repeating while genuinely blocked leaves the block standing', () => {
+    // The prompt kept runDepth at 1, so the repeat is indistinguishable from
+    // the original — and must be, since the pane really is still waiting.
+    applyHookToAgentState(surf, 'UserPromptSubmit', null);
+    applyHookToAgentState(surf, 'Notification', prompt);
+    applyHookToAgentState(surf, 'Notification', nudge);
+    expect(getAgentState(surf)?.state).toBe('blocked');
   });
 });

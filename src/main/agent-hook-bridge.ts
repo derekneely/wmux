@@ -21,7 +21,7 @@
  */
 
 import { SurfaceId } from '../shared/types';
-import { reportAgent, ReportAgentParams } from './agent-state';
+import { getAgentState, reportAgent, ReportAgentParams } from './agent-state';
 
 /** The hook events wmux registers. */
 export type ClaudeHookEvent =
@@ -71,11 +71,29 @@ export function hookEventName(
 }
 
 /**
+ * What the pane had already declared when a hook arrived.
+ *
+ * Only `Notification` reads it, and only to tell a real prompt from the idle
+ * nudge — see that case for why the discriminator is state and not text.
+ */
+export interface HookTurnContext {
+  /** The pane's current declared run refcount. */
+  runDepth: number;
+  /**
+   * Whether UserPromptSubmit is known to be firing at all. False means the
+   * runDepth below carries no information about turn boundaries, so nothing
+   * may be concluded from it.
+   */
+  turnStartTracked: boolean;
+}
+
+/**
  * Map one Claude Code hook event to a report_agent payload, or null to ignore it.
  */
 export function hookToAgentReport(
   event: ClaudeHookEvent,
   message: string | null,
+  ctx: HookTurnContext,
 ): ReportAgentParams | null {
   switch (event) {
     // The user pressed Enter: a turn has STARTED.
@@ -94,14 +112,35 @@ export function hookToAgentReport(
     case 'UserPromptSubmit':
       return { awaitingHuman: false, runDepth: 1 };
 
-    // Claude Code wants the user. This fires both for permission/question
-    // prompts and for the ~60s "still waiting on you" idle nudge, and we park
-    // the pane for both: in either case the agent genuinely is waiting on a
-    // human, which is exactly what `blocked` claims. Sniffing the message text
-    // to tell the two apart was considered and rejected — it would silently
-    // stop working the day Claude Code rewords a prompt, and the failure would
-    // be the dangerous direction (a real prompt read as "not blocked").
+    // Claude Code wants the user. This fires for two different situations:
+    // a permission/question prompt, and the ~60s "Claude is waiting for your
+    // input" idle nudge that Claude Code arms when a turn ends.
+    //
+    // Only the first is `blocked`. "Needs you" claims there is something to
+    // answer, and after a turn has ended there is nothing — the pane is idle,
+    // and saying otherwise is how a pane that nobody has touched starts asking
+    // for attention. Observed exactly that way: Stop at T, nudge at T+60s, on a
+    // session that had just been /clear'd and left alone. /clear wipes the
+    // transcript but not Claude Code's idle timer, so the nudge landed on an
+    // empty conversation and the pane declared "Needs you".
+    //
+    // The two are told apart by STATE, not by the message text. Sniffing the
+    // text was considered and rejected: it would stop working the day Claude
+    // Code rewords a prompt, and would fail in the dangerous direction (a real
+    // permission prompt read as "not blocked"). Run depth cannot drift that way
+    // — a permission prompt can only occur inside a live turn, and
+    // UserPromptSubmit declares runDepth 1 before Claude Code can ask anything.
+    // So runDepth 0 at Notification time means the turn is over, which means
+    // this is the nudge.
+    //
+    // Gated on `turnStartTracked` because that argument only holds while
+    // UserPromptSubmit is actually firing. A config written before wmux
+    // registered that hook (claude-context.ts) would sit at runDepth 0 through
+    // a whole turn, and every real prompt would read as a nudge — the dangerous
+    // direction again. Until wmux has seen one UserPromptSubmit, it declines to
+    // draw the distinction and parks the pane for both, as it always did.
     case 'Notification':
+      if (ctx.turnStartTracked && ctx.runDepth === 0) return null;
       return { awaitingHuman: true, reason: message };
 
     // A tool finished, so a turn is in flight — and nobody is parked on a
@@ -136,6 +175,27 @@ export function hookToAgentReport(
 }
 
 /**
+ * Whether any pane has ever delivered a UserPromptSubmit hook.
+ *
+ * Deliberately global rather than per-surface: what it is really asking is
+ * "does ~/.claude/settings.json carry the UserPromptSubmit hook", and that file
+ * is one file for every pane. A per-surface flag would answer the narrower
+ * "has THIS pane submitted a prompt yet", which is false for a pane whose very
+ * first turn opens with a permission prompt — and would then mis-gate it. One
+ * prompt submitted anywhere proves the hook is live everywhere.
+ *
+ * Starts false, so a fresh main process parks the pane for every Notification
+ * until it has that proof. Safe direction, and it self-corrects on the first
+ * prompt anyone submits.
+ */
+let turnStartTracked = false;
+
+/** Test seam: forget what this module has learned about the hook config. */
+export function resetHookBridge(): void {
+  turnStartTracked = false;
+}
+
+/**
  * Apply a Claude Code hook event to the declared agent state for `surfaceId`.
  * Called from the hook.event pipe handler in index.ts.
  */
@@ -145,8 +205,14 @@ export function applyHookToAgentState(
   message: string | null,
 ): void {
   if (!KNOWN_HOOK_EVENTS.includes(event as ClaudeHookEvent)) return;
+  const hookEvent = event as ClaudeHookEvent;
 
-  const params = hookToAgentReport(event as ClaudeHookEvent, message);
+  if (hookEvent === 'UserPromptSubmit') turnStartTracked = true;
+
+  const params = hookToAgentReport(hookEvent, message, {
+    runDepth: getAgentState(surfaceId)?.runDepth ?? 0,
+    turnStartTracked,
+  });
   if (!params) return;
   reportAgent(surfaceId, params);
 }
