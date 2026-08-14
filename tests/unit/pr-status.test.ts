@@ -20,9 +20,11 @@ import PrStatusIcon from '../../src/renderer/components/Sidebar/PrStatusIcon';
  * React 19 renders that as nothing rather than throwing, which is why the badge
  * degrades quietly to a bare `#450 MERGED` instead of failing loudly.
  *
- * Two guards, because the store already holds uppercase values for anyone with
- * a saved session: normalize on the way in, and let the icon accept whatever
- * casing reaches it.
+ * Two guards: normalize on the way in at the `report_pr` handler, and let the
+ * icon accept whatever casing reaches it anyway. PR fields aren't persisted
+ * across a save/restore, so the second guard isn't recovering from a stale
+ * session — it's a cheap defense at the render boundary against anything
+ * else that might set `prStatus` without going through the handler.
  */
 describe('normalizePrStatus', () => {
   it("accepts gh's own casing", () => {

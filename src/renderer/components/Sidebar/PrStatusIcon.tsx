@@ -7,9 +7,15 @@ interface PrStatusIconProps {
 }
 
 export default function PrStatusIcon({ status, size = 12 }: PrStatusIconProps) {
-  // Normalized here as well as at the `report_pr` handler: a session saved
-  // before that handler existed still holds gh's own `MERGED` casing, and this
-  // switch would run off the end for it.
+  // Normalized here as well as at the `report_pr` handler (pr-metadata.ts):
+  // PR fields are never persisted across a save/restore (they're absent from
+  // both the auto-save and named-save snapshots in App.tsx, and from
+  // `replaceAllWorkspaces`), so a stale-casing value can't survive a restart.
+  // The guard earns its keep anyway as a second line of defense at the render
+  // boundary — any future caller that sets `prStatus` without going through
+  // the handler (a test fixture, a future direct-store write) gets the same
+  // protection this switch already needs to have, rather than a silently
+  // missing glyph.
   switch (normalizePrStatus(status)) {
     case 'open':
       return (
