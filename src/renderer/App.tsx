@@ -9,6 +9,7 @@ import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from
 import { aggregateProgress } from './store/progress-slice';
 import { isDiffTabDismissed } from './store/surface-slice';
 import Sidebar from './components/Sidebar/Sidebar';
+import { normalizePrStatus } from './components/Sidebar/pr-status';
 import Titlebar from './components/Titlebar/Titlebar';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import SettingsWindow from './components/Settings/SettingsWindow';
@@ -334,7 +335,10 @@ function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): voi
       const [num, status, ...labelParts] = cmd.args || [];
       deps.updateWorkspaceMetadata(ws.id, {
         prNumber: num ? parseInt(num) : undefined,
-        prStatus: status as any,
+        // gh reports OPEN/MERGED/CLOSED; the store and the icon speak the
+        // lowercase union. `WorkspaceMetadata.prStatus` is a plain string, so
+        // the casing difference had nothing to catch it on the way through.
+        prStatus: normalizePrStatus(status),
         prLabel: labelParts.join(' '),
       });
       break;
