@@ -9,7 +9,7 @@ import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from
 import { aggregateProgress } from './store/progress-slice';
 import { isDiffTabDismissed } from './store/surface-slice';
 import Sidebar from './components/Sidebar/Sidebar';
-import { normalizePrStatus } from './components/Sidebar/pr-status';
+import { applyPrCommand } from './pr-metadata';
 import Titlebar from './components/Titlebar/Titlebar';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import SettingsWindow from './components/Settings/SettingsWindow';
@@ -331,21 +331,15 @@ function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): voi
     case 'clear_git_branch':
       deps.updateWorkspaceMetadata(ws.id, { gitBranch: undefined, gitDirty: undefined });
       break;
-    case 'report_pr': {
-      const [num, status, ...labelParts] = cmd.args || [];
-      deps.updateWorkspaceMetadata(ws.id, {
-        prNumber: num ? parseInt(num) : undefined,
-        // gh reports OPEN/MERGED/CLOSED; the store and the icon speak the
-        // lowercase union. `WorkspaceMetadata.prStatus` is a plain string, so
-        // the casing difference had nothing to catch it on the way through.
-        prStatus: normalizePrStatus(status),
-        prLabel: labelParts.join(' '),
-      });
+    case 'report_pr':
+    case 'clear_pr': {
+      // See pr-metadata.ts: `clear_pr` is gated on the surface that reported
+      // the PR still being the one asking to clear it, so one pane's poller
+      // can't wipe another pane's PR out of a shared workspace row.
+      const patch = applyPrCommand(cmd, ws);
+      if (patch) deps.updateWorkspaceMetadata(ws.id, patch);
       break;
     }
-    case 'clear_pr':
-      deps.updateWorkspaceMetadata(ws.id, { prNumber: undefined, prStatus: undefined, prLabel: undefined });
-      break;
     case 'report_shell_state':
       applyShellState(cmd, ws, deps);
       break;
