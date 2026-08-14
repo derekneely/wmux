@@ -42,11 +42,22 @@ function Report-Cwd {
 }
 
 # Publish the live cwd for the PR poller.
+#
 # The poller runs in a child runspace, which takes the location it was created
-# in and keeps it — and an env var set afterwards never reaches a process that
-# is already running. The prompt is where the current location is known, so it
-# leaves it here for the poller to pick up on its next tick. The directory is
-# the one wmux-bash-integration.sh already uses for its own hand-off.
+# in and keeps it, so it needs to be told where the pane has got to. An env var
+# cannot carry that: the job is already running by the time the pane moves.
+#
+# Nor can the pipe, which is the obvious candidate and the one to rule out
+# explicitly. It runs one direction — shell to wmux — and the consumer here is
+# another *shell* process, not wmux. The prompt already sends this exact value
+# over as report_pwd; routing the hand-off through the pipe would mean adding
+# currentCwd to the surface listing, a V2 method and a CLI verb to read it back,
+# then spawning node on every 45s tick, so that the shell can ask wmux for
+# something the shell itself just told it. This is a shell-to-shell hand-off, so
+# it stays between the shells.
+#
+# The directory is the one wmux-bash-integration.sh already uses for its own
+# hand-off, rather than a second scratch location.
 $global:_wmux_cwd_file = if ($env:WMUX_SURFACE_ID) {
     $dir = Join-Path ([System.IO.Path]::GetTempPath()) "wmux"
     try { $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop } catch {}
