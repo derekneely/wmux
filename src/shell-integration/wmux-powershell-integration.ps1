@@ -41,6 +41,45 @@ function Report-Cwd {
     }
 }
 
+# Publish the live cwd for the PR poller.
+# The poller runs in a Start-Job child runspace, which takes the location it was
+# created in and keeps it — and an env var set afterwards never reaches a
+# process that is already running. The prompt is where the current location is
+# known, so it leaves it here for the poller to pick up on its next tick.
+$global:_wmux_cwd_file = if ($env:WMUX_SURFACE_ID) {
+    Join-Path ([System.IO.Path]::GetTempPath()) "wmux-cwd-$($env:WMUX_SURFACE_ID).txt"
+} else { $null }
+
+function Update-WmuxCwdFile {
+    if (-not $global:_wmux_cwd_file) { return }
+    try {
+        Set-Content -LiteralPath $global:_wmux_cwd_file -Value $PWD.ProviderPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        # Nothing to do — the poller just keeps its last known location.
+    }
+}
+
+# What a poller tick should send, given gh's output. Pure so the decision can be
+# tested without a job, a pipe, or a GitHub repo.
+function Get-WmuxPrMessage {
+    param([string]$SurfaceId, [string]$PrJson, [int]$ExitCode)
+    if ($ExitCode -eq 0 -and $PrJson) {
+        try {
+            $pr = $PrJson | ConvertFrom-Json -ErrorAction Stop
+            if ($null -ne $pr -and $pr.number) {
+                return "report_pr $SurfaceId $($pr.number) $($pr.state) $($pr.title)"
+            }
+        } catch {
+            # Fall through and clear: unreadable output tells us nothing about
+            # the PR, and the badge already up may belong to another branch.
+        }
+    }
+    # gh had no PR to report — no PR for this branch, not a repo, not
+    # authenticated. Clearing keeps the row honest; staying silent leaves
+    # whatever was last reported pinned there for the life of the workspace.
+    return "clear_pr $SurfaceId"
+}
+
 # Report git branch
 function Report-GitBranch {
     $surfaceId = $env:WMUX_SURFACE_ID
@@ -84,6 +123,7 @@ if (Get-Module -Name PSReadLine -ErrorAction SilentlyContinue) {
 $_wmux_original_prompt = $function:prompt
 function prompt {
     Report-Cwd
+    Update-WmuxCwdFile
     Report-GitBranch
     # Detect if last command was interrupted (Ctrl+C → exit code -1073741510 on Windows)
     if ($LASTEXITCODE -eq -1073741510 -or $LASTEXITCODE -eq 130) {
@@ -111,26 +151,42 @@ $global:_wmux_pr_started = $false
 $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PSEngineEvent]::OnIdle) -Action {
     if ($global:_wmux_pr_started) { return }
     $global:_wmux_pr_started = $true
-    $global:_wmux_pr_job = Start-Job -ScriptBlock {
-        param($surfaceId, $pipeName, $pipeToken)
+    # A job runs in its own runspace and sees none of this session's functions,
+    # so the tick's decision function is carried across as its initialization.
+    $_wmux_pr_init = [scriptblock]::Create("function Get-WmuxPrMessage {`n$(${function:Get-WmuxPrMessage})`n}")
+    $global:_wmux_pr_job = Start-Job -InitializationScript $_wmux_pr_init -ScriptBlock {
+        param($surfaceId, $pipeName, $pipeToken, $cwdFile)
         while ($true) {
             Start-Sleep -Seconds 45
             try {
-                $prJson = gh pr view --json number,state,title 2>$null
-                if ($LASTEXITCODE -eq 0 -and $prJson) {
-                    $pr = $prJson | ConvertFrom-Json
-                    $msg = "report_pr $surfaceId $($pr.number) $($pr.state) $($pr.title)"
-                    if ($pipeToken) { $msg = "auth $pipeToken $msg" }
-                    $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
-                    $pipe.Connect(1000)
-                    $writer = New-Object System.IO.StreamWriter($pipe)
-                    $writer.AutoFlush = $true
-                    $writer.WriteLine($msg)
-                    $pipe.Close()
+                # Follow the pane. This runspace's location is the one it was
+                # created in and never moves on its own, so a pane that has
+                # since cd'd into another repo would keep being answered for
+                # the first one.
+                if ($cwdFile -and (Test-Path -LiteralPath $cwdFile)) {
+                    $live = (Get-Content -LiteralPath $cwdFile -Raw -ErrorAction SilentlyContinue)
+                    if ($live) {
+                        $live = $live.Trim()
+                        if ($live -and (Test-Path -LiteralPath $live)) { Set-Location -LiteralPath $live }
+                    }
                 }
+                $prJson = (gh pr view --json number,state,title 2>$null) -join "`n"
+                $msg = Get-WmuxPrMessage -SurfaceId $surfaceId -PrJson $prJson -ExitCode $LASTEXITCODE
+            } catch {
+                # gh missing, or the location went away underneath us.
+                $msg = "clear_pr $surfaceId"
+            }
+            try {
+                if ($pipeToken) { $msg = "auth $pipeToken $msg" }
+                $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
+                $pipe.Connect(1000)
+                $writer = New-Object System.IO.StreamWriter($pipe)
+                $writer.AutoFlush = $true
+                $writer.WriteLine($msg)
+                $pipe.Close()
             } catch { }
         }
-    } -ArgumentList $env:WMUX_SURFACE_ID, "wmux", $env:WMUX_PIPE_TOKEN
+    } -ArgumentList $env:WMUX_SURFACE_ID, "wmux", $env:WMUX_PIPE_TOKEN, $global:_wmux_cwd_file
 }
 
 # Quick-launch profile startup commands (issue #32).
