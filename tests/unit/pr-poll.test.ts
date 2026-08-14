@@ -338,6 +338,81 @@ describe.skipIf(!host)('Invoke-WmuxPrTick — the flag only advances on a send t
   });
 });
 
+/**
+ * Run `Invoke-WmuxExitCleanup` in a real host with a stubbed `-Send`, so the
+ * "shell exits, tab stays open" path can be exercised without a live pipe or
+ * a real process exit. Mirrors `invokeTick`'s marker-file hand-off.
+ */
+function invokeExitCleanup(args: { cwdFile: string | null; surfaceId: string | null }): {
+  cwdFileRemoved: boolean;
+  sendCalledWith: string | null;
+} {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-exit-'));
+  const marker = path.join(dir, 'sent.txt').replace(/\\/g, '\\\\');
+  const ps = (s: string | null) => (s === null ? '$null' : `'${s.replace(/'/g, "''")}'`);
+  const script = [
+    extractFunction('Invoke-WmuxExitCleanup'),
+    '',
+    `$send = { param($m) Set-Content -LiteralPath '${marker}' -Value $m -Encoding UTF8 }`,
+    `Invoke-WmuxExitCleanup -CwdFile ${ps(args.cwdFile)} -SurfaceId ${ps(args.surfaceId)} -Send $send`,
+    '',
+  ].join('\n');
+  const file = path.join(dir, 'probe.ps1');
+  fs.writeFileSync(file, script, 'utf8');
+  try {
+    execFileSync(host as string, ['-NoProfile', '-NonInteractive', '-File', file], { encoding: 'utf8' });
+    const markerPath = path.join(dir, 'sent.txt');
+    const sendCalledWith = fs.existsSync(markerPath) ? fs.readFileSync(markerPath, 'utf8').trim() : null;
+    const cwdFileRemoved = args.cwdFile ? !fs.existsSync(args.cwdFile) : true;
+    return { cwdFileRemoved, sendCalledWith };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Blocker 2 from the external review: the shell exiting on its own (the user
+// types `exit`, the tab stays open) used to remove only the cwd hand-off
+// file. Nothing sent `clear_pr`, so a badge reported from that pane stayed up
+// until the tab itself was closed — the ONE close-shaped gap the store-side
+// hooks in surface-slice.ts can't see, because no closeSurface/closePane
+// transition happens when the shell dies out from under a still-open tab.
+describe.skipIf(!host)('Invoke-WmuxExitCleanup — what a shell owes wmux on the way out', () => {
+  it('removes the cwd hand-off file when one was configured', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-exit-cwd-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, dir, 'utf8');
+    try {
+      const { cwdFileRemoved } = invokeExitCleanup({ cwdFile, surfaceId: null });
+      expect(cwdFileRemoved).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends clear_pr for the pane surface unconditionally — ownership is enforced on the receiving end', () => {
+    const { sendCalledWith } = invokeExitCleanup({ cwdFile: null, surfaceId: 'surf-exit-1' });
+    expect(sendCalledWith).toBe('clear_pr surf-exit-1');
+  });
+
+  it('sends nothing when the pane has no surface id at all', () => {
+    const { sendCalledWith } = invokeExitCleanup({ cwdFile: null, surfaceId: null });
+    expect(sendCalledWith).toBeNull();
+  });
+
+  it('does both: removes the cwd file AND sends clear_pr in the same cleanup', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-exit-both-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, dir, 'utf8');
+    try {
+      const { cwdFileRemoved, sendCalledWith } = invokeExitCleanup({ cwdFile, surfaceId: 'surf-exit-2' });
+      expect(cwdFileRemoved).toBe(true);
+      expect(sendCalledWith).toBe('clear_pr surf-exit-2');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe.skipIf(!host)('the poller job', () => {
   it('can call Get-WmuxPrMessage inside the job runspace', () => {
     // A job is a separate runspace and inherits none of the session's

@@ -376,7 +376,7 @@ function handleAgentLifecycleEvent(event: any, addNotification: StoreAction, t: 
  * (enforced in replaceSoleTerminalSurface), and not itself an agent surface.
  * Returns true when the spawn was handled via replacement.
  */
-function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfaceId: any, meta: any) => void): boolean {
+export function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfaceId: any, meta: any) => void): boolean {
   if (!event.replaceTab) return false;
   const state = useStore.getState();
   const leaf = findLeaf(ws.splitTree, event.paneId);
@@ -391,6 +391,13 @@ function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfac
   // Intentionally not pushed onto the reopen-closed stack — the replaced
   // surface is an idle default shell, not user work.
   window.wmux?.pty?.kill(replacedSurfaceId);
+  // This kills the PTY directly instead of routing through closeSurface, so
+  // it must run the same ownership-gated PR-badge clear closeSurface would
+  // have run — otherwise a replaced tab that happened to hold the PR badge
+  // leaves `prSurfaceId` pointing at a surface that no longer exists, and
+  // since clear_pr is only honoured from its owner (see pr-metadata.ts), the
+  // badge becomes unclearable by anything, ever.
+  state.clearPrIfSurfaceOwner(event.workspaceId, [replacedSurfaceId]);
   return true;
 }
 
