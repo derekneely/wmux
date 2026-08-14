@@ -200,6 +200,47 @@ describe('surface-slice', () => {
       expect(workspace().prSurfaceId).toBeUndefined();
     });
 
+    it('closePane leaves the badge alone when the owner lives in a different pane', () => {
+      const secondPaneId = `pane-test-2` as PaneId;
+      useStore.getState().updateSplitTree(
+        workspaceId,
+        splitNode(workspace().splitTree, paneId, secondPaneId, 'terminal', 'horizontal'),
+      );
+      const owner = currentLeaf().surfaces[0].id;
+      reportPr(owner);
+
+      // Close the OTHER pane — the owner's pane is untouched.
+      useStore.getState().closePane(workspaceId, secondPaneId);
+
+      expect(workspace().prNumber).toBe(42);
+      expect(workspace().prSurfaceId).toBe(owner);
+    });
+
+    it('closeOtherSurfaces leaves the badge alone when the owner is the tab being kept', () => {
+      useStore.getState().addSurface(workspaceId, paneId, 'terminal');
+      const owner = currentLeaf().surfaces[0].id;
+      reportPr(owner);
+
+      useStore.getState().closeOtherSurfaces(workspaceId, paneId, owner);
+
+      expect(workspace().prNumber).toBe(42);
+      expect(workspace().prSurfaceId).toBe(owner);
+    });
+
+    it('closeSurfacesToRight leaves the badge alone when the owner is left of the cut', () => {
+      const owner = currentLeaf().surfaces[0].id;
+      reportPr(owner);
+      useStore.getState().addSurface(workspaceId, paneId, 'terminal');
+      const second = currentLeaf().surfaces[1].id;
+
+      // Cut after `second`, which is right of `owner` — owner is never dropped.
+      useStore.getState().addSurface(workspaceId, paneId, 'terminal');
+      useStore.getState().closeSurfacesToRight(workspaceId, paneId, second);
+
+      expect(workspace().prNumber).toBe(42);
+      expect(workspace().prSurfaceId).toBe(owner);
+    });
+
     it('moveSurface does NOT clear the badge — the surface still exists, just under a different pane', () => {
       const secondPaneId = `pane-test-2` as PaneId;
       useStore.getState().updateSplitTree(

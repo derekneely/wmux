@@ -73,11 +73,42 @@ function Update-WmuxCwdFile {
     }
 }
 
-# Take the hand-off file with us, so a closed pane leaves nothing behind.
-$null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PSEngineEvent]::Exiting) -Action {
-    if ($global:_wmux_cwd_file) {
-        Remove-Item -LiteralPath $global:_wmux_cwd_file -Force -ErrorAction SilentlyContinue
+# What the shell owes wmux on the way out: the cwd hand-off file (so a closed
+# pane leaves nothing behind), and — if this pane ever reported a PR — a
+# `clear_pr` for it. Pure-ish and parameterized so it can be driven directly
+# in a test instead of only through a real process exit.
+#
+# The `clear_pr` is unconditional: it fires whenever WMUX_SURFACE_ID is set,
+# with no check of whether THIS pane actually holds the badge. That's safe
+# because ownership is enforced on the receiving end — `clear_pr` in the
+# renderer's `applyPrCommand` (pr-metadata.ts) is only honoured when the
+# surface id it carries matches `ws.prSurfaceId`, so a pane that never
+# reported a PR sends a clear that is simply dropped, and can never step on
+# another pane's badge.
+#
+# This covers exactly the "shell exits, tab stays open" case (e.g. the user
+# types `exit`) — the one the store-side close hooks in surface-slice.ts
+# cannot see, because no closeSurface/closePane transition happens: the tab
+# is still there, only the shell under it died. A killed PTY (Ctrl+W, `wmux
+# close-pane`, closing the workspace) runs no exit trap at all — that case is
+# handled on the store side instead, at the transition that does the killing.
+function Invoke-WmuxExitCleanup {
+    param(
+        [string]$CwdFile,
+        [string]$SurfaceId,
+        # Overridable for tests; defaults to the real pipe sender.
+        [scriptblock]$Send
+    )
+    if ($CwdFile) {
+        Remove-Item -LiteralPath $CwdFile -Force -ErrorAction SilentlyContinue
     }
+    if ($SurfaceId) {
+        if ($Send) { & $Send "clear_pr $SurfaceId" } else { Send-WmuxMessage "clear_pr $SurfaceId" }
+    }
+}
+
+$null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PSEngineEvent]::Exiting) -Action {
+    Invoke-WmuxExitCleanup -CwdFile $global:_wmux_cwd_file -SurfaceId $env:WMUX_SURFACE_ID
 }
 
 # What a poller tick should send. Pure so the decision can be tested without a
