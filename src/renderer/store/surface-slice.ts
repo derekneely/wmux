@@ -16,15 +16,26 @@ import { WorkspaceSlice } from './workspace-slice';
 // close). `ws.prSurfaceId` (see pr-metadata.ts) says who owns the row, so
 // this only clears when the surface actually leaving IS that owner.
 //
-// Deliberately NOT hooked on `pty:exit`: that fires when a shell inside a
-// still-open tab exits on its own (e.g. the user types `exit`) — the tab
-// itself isn't going anywhere, and the PowerShell integration's own trap is
-// expected to send `clear_pr` in that case. And deliberately NOT hooked on
-// `moveSurface` / `splitAndMoveSurface`: the surface — and the PR it
-// owns — keeps existing, it's just relocated to a different pane (or a
-// different workspace's tree). Moving the surface without following its
-// `prSurfaceId` claim to the destination workspace is a real gap, but it's a
-// distinct problem from issue #4 (closing a pane), so it's left alone here.
+// Deliberately NOT hooked on `moveSurface` / `splitAndMoveSurface`: the
+// surface — and the PR it owns — keeps existing, it's just relocated to a
+// different pane (or a different workspace's tree). Moving the surface
+// without following its `prSurfaceId` claim to the destination workspace is
+// a real gap, but it's a distinct problem from issue #4 (closing a pane), so
+// it's left alone here.
+//
+// `pty:exit` (a shell inside a still-open tab exiting on its own, e.g. the
+// user types `exit`) is handled the OTHER way: the PowerShell integration's
+// Exiting trap sends `clear_pr` itself (see
+// wmux-powershell-integration.ps1), since the store has no signal at all for
+// "the shell died but the tab is still there" — nothing here calls
+// closeSurface/closePane for that case, so there is no state transition to
+// hook.
+//
+// Exposed as a store action (rather than kept module-private) so callers
+// outside this slice — `App.tsx`'s `--replace-tab` spawn path, which
+// destroys the reporting surface directly via `pty.kill` instead of going
+// through `closeSurface` — can run the same ownership-gated clear instead of
+// re-deriving it.
 function clearPrIfOwner(
   get: () => SliceState,
   workspaceId: WorkspaceId,
@@ -70,6 +81,19 @@ export interface SurfaceSlice {
 
   /** Close a surface; if it's the last one in the pane, the pane is removed */
   closeSurface: (workspaceId: WorkspaceId, paneId: PaneId, surfaceId: SurfaceId) => void;
+
+  /**
+   * Drop the workspace's PR badge iff `ws.prSurfaceId` is one of
+   * `destroyedSurfaceIds` — a no-op otherwise (unowned badge, or the owner
+   * isn't in the list). Every in-slice close path (closeSurface, closePane,
+   * closeOtherSurfaces, closeSurfacesToRight) already runs this at the same
+   * transition that reaps the PTY; this is the same check exposed for a
+   * caller OUTSIDE the slice that destroys a surface a different way (see
+   * `App.tsx`'s `--replace-tab` spawn path, which calls `pty.kill` directly
+   * rather than routing through `closeSurface`) — so that path doesn't have
+   * to re-derive the ownership rule to avoid leaving an unclearable badge.
+   */
+  clearPrIfSurfaceOwner: (workspaceId: WorkspaceId, destroyedSurfaceIds: readonly SurfaceId[]) => void;
 
   /**
    * The path behind every USER close gesture for a tab (the tab ×, Ctrl+W).
@@ -260,6 +284,10 @@ function pushClosedSurface(workspaceId: WorkspaceId, surface: SurfaceRef): void 
 // ─── Slice creator ───────────────────────────────────────────────────────────
 
 export const createSurfaceSlice: StateCreator<SliceState, [], [], SurfaceSlice> = (set, get) => ({
+  clearPrIfSurfaceOwner(workspaceId, destroyedSurfaceIds) {
+    clearPrIfOwner(get, workspaceId, destroyedSurfaceIds);
+  },
+
   addSurface(workspaceId, paneId, type, options) {
     const surfaceId: SurfaceId = `surf-${uuid()}` as SurfaceId;
 
