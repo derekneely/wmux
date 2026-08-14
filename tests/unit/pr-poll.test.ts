@@ -45,10 +45,14 @@ function extractFunction(name: string): string {
   return source.slice(start, end + 2);
 }
 
-/** The job's script block — everything the poller runs on a tick. */
+/**
+ * The job's script block — everything the poller runs on a tick. Anchored on
+ * the `Start-Job` *call*, not the first mention of the word: the comments above
+ * it discuss the job, and slicing from those swept in the functions in between.
+ */
 function pollerJobBlock(): string {
-  const start = source.indexOf('Start-Job');
-  expect(start, 'no Start-Job in the integration script').toBeGreaterThan(-1);
+  const start = source.indexOf('= Start-Job ');
+  expect(start, 'no Start-Job call in the integration script').toBeGreaterThan(-1);
   return source.slice(start);
 }
 
@@ -71,7 +75,13 @@ const host = findPowerShell();
  * with -File: the arguments carry JSON and quotes, and -Command would have them
  * re-parsed by the host's own command-line splitter on the way in.
  */
-function prMessage(args: { surfaceId: string; prJson: string; exitCode: number }): string {
+function prMessage(args: {
+  surfaceId: string;
+  prJson: string;
+  exitCode: number;
+  inRepo?: boolean;
+  reported?: boolean;
+}): string {
   // Single-quoted PowerShell literals: the payload is JSON, and a double-quoted
   // string would have its `"` and `$` re-read by the parser.
   const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -79,7 +89,8 @@ function prMessage(args: { surfaceId: string; prJson: string; exitCode: number }
     extractFunction('Get-WmuxPrMessage'),
     '',
     `Get-WmuxPrMessage -SurfaceId ${ps(args.surfaceId)} ` +
-      `-PrJson ${ps(args.prJson)} -ExitCode ${args.exitCode}`,
+      `-PrJson ${ps(args.prJson)} -ExitCode ${args.exitCode} ` +
+      `-InRepo $${args.inRepo ?? true} -Reported $${args.reported ?? false}`,
     '',
   ].join('\n');
 
@@ -111,18 +122,39 @@ describe.skipIf(!host)('Get-WmuxPrMessage — what a poller tick decides to send
     expect(prMessage({ surfaceId, prJson: json, exitCode: 0 })).toBe(`report_pr ${surfaceId} 7 OPEN a b c d`);
   });
 
-  it('clears the badge when gh exits non-zero', () => {
-    // No PR for this branch, or gh is not authenticated. This is the tick that
-    // used to send nothing and leave the previous PR up forever.
-    expect(prMessage({ surfaceId, prJson: '', exitCode: 1 })).toBe(`clear_pr ${surfaceId}`);
+  it('retracts its own report when the branch it reported has no PR', () => {
+    // The tick that used to send nothing and leave the previous PR up forever.
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, reported: true })).toBe(`clear_pr ${surfaceId}`);
   });
 
-  it('clears the badge when gh exits zero but says nothing', () => {
-    expect(prMessage({ surfaceId, prJson: '', exitCode: 0 })).toBe(`clear_pr ${surfaceId}`);
+  it('retracts when gh exits zero but says nothing', () => {
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 0, reported: true })).toBe(`clear_pr ${surfaceId}`);
   });
 
-  it('clears the badge rather than reporting unparseable output', () => {
-    expect(prMessage({ surfaceId, prJson: 'not json at all', exitCode: 0 })).toBe(`clear_pr ${surfaceId}`);
+  it('retracts rather than reporting unparseable output', () => {
+    expect(prMessage({ surfaceId, prJson: 'not json at all', exitCode: 0, reported: true })).toBe(
+      `clear_pr ${surfaceId}`,
+    );
+  });
+
+  // PR metadata is workspace-scoped but every pwsh pane polls, so a pane that
+  // clears unconditionally speaks for panes it knows nothing about. Two panes
+  // in one workspace — one on a branch with a PR, one not — would take turns
+  // reporting and clearing every 45s. A pane only ever retracts its own claim.
+  it('stays quiet when it never reported a PR in the first place', () => {
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, reported: false })).toBe('');
+  });
+
+  // A pane wandering out of a repo says nothing about the workspace's PR — the
+  // badge belongs to the workspace, not to wherever one pane happens to be
+  // standing.
+  it('leaves the badge alone when the pane is not in a repo at all', () => {
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, inRepo: false, reported: true })).toBe('');
+  });
+
+  it('reports nothing from outside a repo even if gh answered', () => {
+    const json = JSON.stringify({ number: 450, state: 'MERGED', title: 't' });
+    expect(prMessage({ surfaceId, prJson: json, exitCode: 0, inRepo: false })).toBe('');
   });
 });
 
@@ -172,7 +204,8 @@ describe.skipIf(!host)('the poller job', () => {
         '',
         (initLine as string).trim(),
         '$j = Start-Job -InitializationScript $_wmux_pr_init -ScriptBlock {',
-        "  Get-WmuxPrMessage -SurfaceId 'surf-1' -PrJson '{\"number\":450,\"state\":\"MERGED\",\"title\":\"t\"}' -ExitCode 0",
+        "  Get-WmuxPrMessage -SurfaceId 'surf-1' -PrJson '{\"number\":450,\"state\":\"MERGED\",\"title\":\"t\"}' " +
+          '-ExitCode 0 -InRepo $true -Reported $false',
         '}',
         '$null = Wait-Job $j -Timeout 30',
         'Receive-Job $j',
@@ -203,6 +236,27 @@ describe('PR poller wiring', () => {
   it('re-reads the pane cwd on every tick instead of trusting Start-Job', () => {
     const job = pollerJobBlock();
     expect(job).toContain('Set-Location');
+  });
+
+  it('asks whether the pane is in a repo before deciding anything', () => {
+    // Distinguishes "on a branch with no PR" (the pane's own claim to retract)
+    // from "not looking at a repo at all" (nothing to say about the badge).
+    expect(pollerJobBlock()).toMatch(/git\s+rev-parse/);
+  });
+
+  it('remembers whether it was the one that reported', () => {
+    const job = pollerJobBlock();
+    expect(job).toContain('-Reported');
+    // Nothing is sent when the tick had nothing to say.
+    expect(job).toMatch(/if\s*\(\s*\$msg\s*\)/);
+  });
+
+  it('keeps the cwd hand-off in the temp directory the integrations already use', () => {
+    // wmux-bash-integration.sh writes under <temp>\wmux; sharing it keeps this
+    // from becoming a second scratch location, and makes the leftovers easy to
+    // find if the exit handler ever misses one.
+    expect(source).toMatch(/Join-Path \(\[System\.IO\.Path\]::GetTempPath\(\)\) "wmux"/);
+    expect(source).toContain('PSEngineEvent]::Exiting');
   });
 
   it('publishes the pane cwd from the prompt, which is where it is known', () => {
