@@ -186,6 +186,158 @@ describe.skipIf(!host)('the integration script itself', () => {
   });
 });
 
+/**
+ * Run `Resolve-WmuxPaneCwd` in a real host against a real temp file. This is
+ * genuinely filesystem-shaped behavior (missing file, empty file, a path that
+ * no longer exists) so it's exercised with real files rather than mocked.
+ */
+function resolvePaneCwd(cwdFile: string | null): string {
+  const script = [extractFunction('Resolve-WmuxPaneCwd'), '', `$r = Resolve-WmuxPaneCwd -CwdFile ${cwdFile ? `'${cwdFile.replace(/'/g, "''")}'` : "''"}`, 'if ($null -eq $r) { "<null>" } else { $r }', ''].join('\n');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-resolve-')), 'probe.ps1');
+  fs.writeFileSync(file, script, 'utf8');
+  try {
+    return execFileSync(host as string, ['-NoProfile', '-NonInteractive', '-File', file], {
+      encoding: 'utf8',
+    }).trim();
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+}
+
+describe.skipIf(!host)('Resolve-WmuxPaneCwd — what the job trusts as "the pane is here"', () => {
+  it('resolves a file that names a real directory', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-realdir-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, dir, 'utf8');
+    expect(resolvePaneCwd(cwdFile)).toBe(dir);
+  });
+
+  it('returns nothing when the hand-off file does not exist', () => {
+    const missing = path.join(os.tmpdir(), 'wmux-does-not-exist', 'cwd.txt');
+    expect(resolvePaneCwd(missing)).toBe('<null>');
+  });
+
+  it('returns nothing when the hand-off file is empty', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-empty-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, '', 'utf8');
+    expect(resolvePaneCwd(cwdFile)).toBe('<null>');
+  });
+
+  it('returns nothing when the hand-off file is whitespace only', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-ws-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, '   \n', 'utf8');
+    expect(resolvePaneCwd(cwdFile)).toBe('<null>');
+  });
+
+  it('returns nothing when the named path no longer exists (deleted since the write)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-stale-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    const goneDir = path.join(dir, 'gone');
+    fs.mkdirSync(goneDir);
+    fs.writeFileSync(cwdFile, goneDir, 'utf8');
+    fs.rmdirSync(goneDir);
+    expect(resolvePaneCwd(cwdFile)).toBe('<null>');
+  });
+
+  it('returns nothing when no cwd file was ever configured', () => {
+    expect(resolvePaneCwd(null)).toBe('<null>');
+  });
+});
+
+/**
+ * Run `Invoke-WmuxPrTick` in a real host with a stubbed `-Send`, so the
+ * send-succeeded/send-failed branches can be driven without a live pipe. The
+ * stub records whether it ran (and with what) by writing to a marker file —
+ * PowerShell script blocks passed through `Start-Job`-adjacent plumbing can't
+ * hand a value back to the Node test process any other way.
+ */
+function invokeTick(args: {
+  message: string;
+  currentlyReported: boolean;
+  sendSucceeds: boolean;
+}): { reported: boolean; sendCalledWith: string | null } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-tick-'));
+  const marker = path.join(dir, 'sent.txt').replace(/\\/g, '\\\\');
+  const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const script = [
+    extractFunction('Invoke-WmuxPrTick'),
+    '',
+    `$send = { param($m) Set-Content -LiteralPath '${marker}' -Value $m -Encoding UTF8; $${args.sendSucceeds} }`,
+    `$r = Invoke-WmuxPrTick -Message ${ps(args.message)} -CurrentlyReported $${args.currentlyReported} -Send $send`,
+    '"reported=$r"',
+    '',
+  ].join('\n');
+  const file = path.join(dir, 'probe.ps1');
+  fs.writeFileSync(file, script, 'utf8');
+  try {
+    const out = execFileSync(host as string, ['-NoProfile', '-NonInteractive', '-File', file], {
+      encoding: 'utf8',
+    }).trim();
+    const markerPath = path.join(dir, 'sent.txt');
+    const sendCalledWith = fs.existsSync(markerPath) ? fs.readFileSync(markerPath, 'utf8').trim() : null;
+    return { reported: out === 'reported=True', sendCalledWith };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe.skipIf(!host)('Invoke-WmuxPrTick — the flag only advances on a send that landed', () => {
+  it('flips reported to true after a report_pr send that succeeds', () => {
+    const { reported, sendCalledWith } = invokeTick({
+      message: 'report_pr surf-1 5 OPEN t',
+      currentlyReported: false,
+      sendSucceeds: true,
+    });
+    expect(sendCalledWith).toBe('report_pr surf-1 5 OPEN t');
+    expect(reported).toBe(true);
+  });
+
+  it('flips reported to false after a clear_pr send that succeeds', () => {
+    const { reported } = invokeTick({
+      message: 'clear_pr surf-1',
+      currentlyReported: true,
+      sendSucceeds: true,
+    });
+    expect(reported).toBe(false);
+  });
+
+  // This is defect 1: the old job set `$reported = $msg.StartsWith("report_pr")`
+  // BEFORE attempting the send, so a clear that failed to go out still made the
+  // pane believe it had nothing left to retract, and no later tick would ever
+  // try that clear again. The flag must stay put on a failed send so the next
+  // tick computes the same clear_pr and retries it.
+  it('leaves reported=true alone when a clear_pr send fails, so the clear is retried', () => {
+    const { reported, sendCalledWith } = invokeTick({
+      message: 'clear_pr surf-1',
+      currentlyReported: true,
+      sendSucceeds: false,
+    });
+    expect(sendCalledWith).toBe('clear_pr surf-1'); // the send was attempted
+    expect(reported).toBe(true); // but the flag didn't move, so it'll retry
+  });
+
+  it('leaves reported=false alone when a report_pr send fails, so the report is retried', () => {
+    const { reported } = invokeTick({
+      message: 'report_pr surf-1 5 OPEN t',
+      currentlyReported: false,
+      sendSucceeds: false,
+    });
+    expect(reported).toBe(false);
+  });
+
+  it('never calls Send when the tick has nothing to say, and leaves the flag untouched', () => {
+    const { reported, sendCalledWith } = invokeTick({
+      message: '',
+      currentlyReported: true,
+      sendSucceeds: true,
+    });
+    expect(sendCalledWith).toBeNull();
+    expect(reported).toBe(true);
+  });
+});
+
 describe.skipIf(!host)('the poller job', () => {
   it('can call Get-WmuxPrMessage inside the job runspace', () => {
     // A job is a separate runspace and inherits none of the session's
@@ -223,6 +375,51 @@ describe.skipIf(!host)('the poller job', () => {
       fs.rmSync(path.dirname(probe), { recursive: true, force: true });
     }
   });
+
+  it('can call Resolve-WmuxPaneCwd and Invoke-WmuxPrTick inside the job runspace', () => {
+    // Same hand-off mechanism as above, for the two functions added to fix
+    // defects #1 and #2 — if either were left out of the initialization
+    // script the job would throw the moment it tried to call them.
+    const initLine = source.split('\n').find((l) => l.includes('[scriptblock]::Create('));
+    expect(initLine, 'no initialization script built for the job').toBeTruthy();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmux-job2-'));
+    const cwdFile = path.join(dir, 'cwd.txt');
+    fs.writeFileSync(cwdFile, dir, 'utf8');
+    const probe = path.join(dir, 'job.ps1');
+    fs.writeFileSync(
+      probe,
+      [
+        extractFunction('Get-WmuxPrMessage'),
+        extractFunction('Resolve-WmuxPaneCwd'),
+        extractFunction('Invoke-WmuxPrTick'),
+        '',
+        (initLine as string).trim(),
+        `$cwdFile = '${cwdFile.replace(/'/g, "''")}'`,
+        '$j = Start-Job -InitializationScript $_wmux_pr_init -ScriptBlock {',
+        '  param($cwdFile)',
+        '  $resolved = Resolve-WmuxPaneCwd -CwdFile $cwdFile',
+        "  $sent = Invoke-WmuxPrTick -Message 'clear_pr surf-1' -CurrentlyReported $true -Send { param($m) $false }",
+        '  "resolved=$resolved sent=$sent"',
+        '} -ArgumentList $cwdFile',
+        '$null = Wait-Job $j -Timeout 30',
+        'Receive-Job $j',
+        'Remove-Job $j -Force',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    try {
+      const out = execFileSync(host as string, ['-NoProfile', '-NonInteractive', '-File', probe], {
+        encoding: 'utf8',
+      }).trim();
+      // Resolve-WmuxPaneCwd found the real dir; Invoke-WmuxPrTick kept the
+      // flag true because the stubbed send returned $false (the retry path).
+      expect(out).toBe(`resolved=${dir} sent=True`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('PR poller wiring', () => {
@@ -247,8 +444,27 @@ describe('PR poller wiring', () => {
   it('remembers whether it was the one that reported', () => {
     const job = pollerJobBlock();
     expect(job).toContain('-Reported');
-    // Nothing is sent when the tick had nothing to say.
-    expect(job).toMatch(/if\s*\(\s*\$msg\s*\)/);
+  });
+
+  it('routes the send through Invoke-WmuxPrTick instead of flipping the flag inline', () => {
+    // The bug this guards: `$reported = $msg.StartsWith("report_pr")` executed
+    // BEFORE the pipe write, so a failed send still lost the pane's memory of
+    // having reported. Send-then-flip has to happen in one place the tests can
+    // drive with a stubbed send (see the Invoke-WmuxPrTick describe block
+    // below) rather than inline in the job where only a live pipe reaches it.
+    const job = pollerJobBlock();
+    expect(job).toContain('Invoke-WmuxPrTick');
+    expect(job).not.toMatch(/\$reported\s*=\s*\$msg\.StartsWith/);
+  });
+
+  it('treats an unresolvable cwd as no information, not as "stay put"', () => {
+    // The old shape skipped Set-Location on a bad hand-off and fell through to
+    // probing git/gh from wherever the job runspace last was — reporting a
+    // stale repo's PR as if it were current. Resolve-WmuxPaneCwd centralizes
+    // "can we even tell where the pane is" so the job can skip the probe
+    // entirely rather than guess.
+    const job = pollerJobBlock();
+    expect(job).toContain('Resolve-WmuxPaneCwd');
   });
 
   it('keeps the cwd hand-off in the temp directory the integrations already use', () => {

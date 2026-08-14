@@ -116,6 +116,69 @@ function Get-WmuxPrMessage {
     return ""
 }
 
+# What the poller should trust as "the pane is here" this tick. Pure other
+# than reading the hand-off file, so it can be tested directly against real
+# files rather than only through the job.
+#
+# Anything that leaves genuine doubt about where the pane currently is — the
+# file missing, empty, unreadable, or naming a path that Set-Location would
+# reject outright (deleted since the write, or a non-filesystem provider
+# location such as `cd Env:` whose ProviderPath is not a directory at all) —
+# returns $null rather than a best guess. A caller that fell back to "wherever
+# the job runspace last was" would go on polling (and reporting on) a stale
+# repo, which is the frozen-cwd bug this file exists to fix — the exit handler
+# above deletes this same file when the shell closes, so this also stops a job
+# that briefly outlives its shell from reporting on it.
+function Resolve-WmuxPaneCwd {
+    param([string]$CwdFile)
+    if (-not $CwdFile) { return $null }
+    if (-not (Test-Path -LiteralPath $CwdFile -PathType Leaf)) { return $null }
+    try {
+        $live = Get-Content -LiteralPath $CwdFile -Raw -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not $live) { return $null }
+    $live = $live.Trim()
+    if (-not $live) { return $null }
+    try {
+        if (-not (Test-Path -LiteralPath $live -PathType Container -ErrorAction Stop)) { return $null }
+    } catch {
+        return $null
+    }
+    return $live
+}
+
+# Carries out one tick's send and updates the "did I claim this PR" flag from
+# the outcome, not from the decision. The send is handed in as a scriptblock
+# so this can be exercised without a live pipe: production passes the real
+# named-pipe write, tests pass a stub that can be made to fail on demand.
+#
+# The flag must only advance on a send that actually landed. The earlier shape
+# flipped it right after deciding what to send, before attempting the write —
+# so a clear_pr that failed to go out (pipe not up yet, wmux busy, connect
+# timeout) still left the pane believing it had nothing left to retract, and
+# no later tick would ever try that clear again: the badge this file exists to
+# unstick would get stuck the same way, just on the send instead of the
+# decision. Leaving the flag where it was makes the next tick recompute the
+# same message and retry it.
+function Invoke-WmuxPrTick {
+    param(
+        [string]$Message,
+        [bool]$CurrentlyReported,
+        [scriptblock]$Send
+    )
+    if (-not $Message) { return $CurrentlyReported }
+    $ok = $false
+    try {
+        $ok = [bool](& $Send $Message)
+    } catch {
+        $ok = $false
+    }
+    if (-not $ok) { return $CurrentlyReported }
+    return $Message.StartsWith('report_pr')
+}
+
 # Report git branch
 function Report-GitBranch {
     $surfaceId = $env:WMUX_SURFACE_ID
@@ -188,8 +251,8 @@ $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PS
     if ($global:_wmux_pr_started) { return }
     $global:_wmux_pr_started = $true
     # A job runs in its own runspace and sees none of this session's functions,
-    # so the tick's decision function is carried across as its initialization.
-    $_wmux_pr_init = [scriptblock]::Create("function Get-WmuxPrMessage {`n$(${function:Get-WmuxPrMessage})`n}")
+    # so the tick's decision functions are carried across as its initialization.
+    $_wmux_pr_init = [scriptblock]::Create("function Get-WmuxPrMessage {`n$(${function:Get-WmuxPrMessage})`n}`nfunction Resolve-WmuxPaneCwd {`n$(${function:Resolve-WmuxPaneCwd})`n}`nfunction Invoke-WmuxPrTick {`n$(${function:Invoke-WmuxPrTick})`n}")
     $global:_wmux_pr_job = Start-Job -InitializationScript $_wmux_pr_init -ScriptBlock {
         param($surfaceId, $pipeName, $pipeToken, $cwdFile)
         # Whether the PR currently on the row is this pane's own claim.
@@ -201,40 +264,45 @@ $null = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PS
                 # Follow the pane. This runspace's location is the one it was
                 # created in and never moves on its own, so a pane that has
                 # since cd'd into another repo would keep being answered for
-                # the first one.
-                if ($cwdFile -and (Test-Path -LiteralPath $cwdFile)) {
-                    $live = (Get-Content -LiteralPath $cwdFile -Raw -ErrorAction SilentlyContinue)
-                    if ($live) {
-                        $live = $live.Trim()
-                        if ($live -and (Test-Path -LiteralPath $live)) { Set-Location -LiteralPath $live }
+                # the first one — unless the hand-off can't be trusted this
+                # tick, in which case there is nothing to probe: staying on the
+                # old location and reporting its PR would be answering for a
+                # pane that may have moved on, or closed.
+                $resolvedCwd = Resolve-WmuxPaneCwd -CwdFile $cwdFile
+                if ($resolvedCwd) {
+                    Set-Location -LiteralPath $resolvedCwd
+                    $null = git rev-parse --git-dir 2>$null
+                    $inRepo = $LASTEXITCODE -eq 0
+                    $prJson = ""
+                    $ghExit = 1
+                    if ($inRepo) {
+                        $prJson = (gh pr view --json number,state,title 2>$null) -join "`n"
+                        $ghExit = $LASTEXITCODE
                     }
+                    $msg = Get-WmuxPrMessage -SurfaceId $surfaceId -PrJson $prJson -ExitCode $ghExit `
+                        -InRepo $inRepo -Reported $reported
                 }
-                $null = git rev-parse --git-dir 2>$null
-                $inRepo = $LASTEXITCODE -eq 0
-                $prJson = ""
-                $ghExit = 1
-                if ($inRepo) {
-                    $prJson = (gh pr view --json number,state,title 2>$null) -join "`n"
-                    $ghExit = $LASTEXITCODE
-                }
-                $msg = Get-WmuxPrMessage -SurfaceId $surfaceId -PrJson $prJson -ExitCode $ghExit `
-                    -InRepo $inRepo -Reported $reported
             } catch {
                 # git or gh missing, or the location went away underneath us —
                 # all of which say nothing about the PR on the row.
                 $msg = ""
             }
-            if ($msg) {
-                $reported = $msg.StartsWith("report_pr")
+            # The flag only moves if the send below actually lands — see
+            # Invoke-WmuxPrTick for why that ordering matters.
+            $reported = Invoke-WmuxPrTick -Message $msg -CurrentlyReported $reported -Send {
+                param($m)
                 try {
-                    $line = if ($pipeToken) { "auth $pipeToken $msg" } else { $msg }
+                    $line = if ($pipeToken) { "auth $pipeToken $m" } else { $m }
                     $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
                     $pipe.Connect(1000)
                     $writer = New-Object System.IO.StreamWriter($pipe)
                     $writer.AutoFlush = $true
                     $writer.WriteLine($line)
                     $pipe.Close()
-                } catch { }
+                    $true
+                } catch {
+                    $false
+                }
             }
         }
     } -ArgumentList $env:WMUX_SURFACE_ID, "wmux", $env:WMUX_PIPE_TOKEN, $global:_wmux_cwd_file
