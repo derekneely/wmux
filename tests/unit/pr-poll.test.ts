@@ -145,11 +145,22 @@ describe.skipIf(!host)('Get-WmuxPrMessage — what a poller tick decides to send
     expect(prMessage({ surfaceId, prJson: '', exitCode: 1, reported: false })).toBe('');
   });
 
-  // A pane wandering out of a repo says nothing about the workspace's PR — the
-  // badge belongs to the workspace, not to wherever one pane happens to be
-  // standing.
-  it('leaves the badge alone when the pane is not in a repo at all', () => {
-    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, inRepo: false, reported: true })).toBe('');
+  // Walking out of a repo is the one way a badge could outlive what it
+  // describes: the prompt clears the branch off the row on the very next
+  // command, and a poller that stayed quiet here would leave the PR sitting
+  // beside a row that no longer has a repo behind it. The retraction is safe
+  // for the same reason as every other one — it names this pane, and the
+  // renderer honours a clear only from the pane that currently owns the badge.
+  it('retracts its own badge when the pane walks out of the repo', () => {
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, inRepo: false, reported: true })).toBe(
+      `clear_pr ${surfaceId}`,
+    );
+  });
+
+  // Still nothing to say for a pane that never claimed the badge — the pane in
+  // ~ must not clear the PR its neighbour just reported.
+  it('stays quiet outside a repo when it never claimed the badge', () => {
+    expect(prMessage({ surfaceId, prJson: '', exitCode: 1, inRepo: false, reported: false })).toBe('');
   });
 
   it('reports nothing from outside a repo even if gh answered', () => {

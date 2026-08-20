@@ -121,10 +121,17 @@ function Get-WmuxPrMessage {
         [bool]$InRepo,
         [bool]$Reported
     )
-    # A pane standing outside a repo knows nothing about the workspace's PR.
-    # The badge belongs to the workspace, so wandering into ~ must not take it
-    # down with it.
-    if (-not $InRepo) { return "" }
+    # A pane standing outside a repo knows nothing about anyone else's PR, so it
+    # must not speak for the workspace at large — but it does still answer for
+    # the claim it made itself. Leaving that claim up is how a badge outlives
+    # the repo it came from: `cd ~` clears the branch off the row and leaves the
+    # PR sitting next to it. The ownership gate on the renderer side
+    # (`applyPrCommand`) drops a clear from any pane that isn't the recorded
+    # owner, so retracting here can only ever take down this pane's own badge.
+    if (-not $InRepo) {
+        if ($Reported) { return "clear_pr $SurfaceId" }
+        return ""
+    }
 
     if ($ExitCode -eq 0 -and $PrJson) {
         try {
