@@ -649,6 +649,18 @@ async function cmdNewWorkspace(args: string[]): Promise<void> {
   print(await sendV2('workspace.create', params));
 }
 
+/**
+ * The workspace this shell lives in (issue #5). An agent knows its surface
+ * (`WMUX_SURFACE_ID`) but had no way to name the workspace holding it, and
+ * `list-workspaces`' `isActive` answers about the FOCUSED workspace — the wrong
+ * one for every background pane, silently. `--surface <id>` asks on another
+ * pane's behalf. A surface that resolves to nothing is an error, not a guess.
+ */
+async function cmdCurrentWorkspace(args: string[]): Promise<void> {
+  const surface = getFlag(args, '--surface');
+  print(await sendV2('workspace.current', surface ? { caller: surface } : {}));
+}
+
 // Remote terminal (issue #78): open a workspace whose shell is the OpenSSH
 // client connecting to <target>. Everything that isn't a wmux flag is passed
 // through to ssh, so `wmux ssh -p 2222 user@host` works as expected.
@@ -1422,6 +1434,8 @@ const COMMAND_SPECS = {
   'select-workspace': { usage: 'wmux select-workspace <workspaceId>' },
   'rename-workspace': { usage: 'wmux rename-workspace <workspaceId> <title>', passthrough: true },
   'list-workspaces': { usage: 'wmux list-workspaces' },
+  'current-workspace': { usage: 'wmux current-workspace [--surface <id>]', value: ['--surface'] },
+  whoami: { usage: 'wmux whoami [--surface <id>]   (alias of current-workspace)', value: ['--surface'] },
 
   // Surface
   'new-surface': {
@@ -1669,6 +1683,8 @@ const COMMANDS: Record<CommandName, (args: string[]) => Promise<void> | void> = 
   'select-workspace': async (args) => print(await sendV2('workspace.select', { id: args[1] })),
   'rename-workspace': async (args) => print(await sendV2('workspace.rename', { id: args[1], title: args[2] })),
   'list-workspaces': async () => print(await sendV2('workspace.list')),
+  'current-workspace': cmdCurrentWorkspace,
+  whoami: cmdCurrentWorkspace,
 
   // Surface
   'new-surface': async (args) => {
@@ -1848,6 +1864,7 @@ Usage: wmux <command> [options]
 
 System:     ping, identify, capabilities, list-windows, focus-window <id>, new-window
 Workspace:  new-workspace, close-workspace, select-workspace, rename-workspace, list-workspaces
+            current-workspace | whoami [--surface <id>]   (the workspace THIS pane is in)
 Remote:     ssh [ssh options] <user@host> [--title T]   (remote terminal in a new workspace)
             bridge [--port P] [--host H] [--wsl]   (expose this wmux's pipe over TCP, default 127.0.0.1:9787)
             token                          (print this instance's auth token, for --token)

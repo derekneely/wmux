@@ -325,7 +325,7 @@ The pipe server in `index.ts` handles V2 JSON-RPC methods. Most delegate to the 
 
 **Fully implemented V2 methods:**
 - `system.identify`, `system.capabilities`, `system.tree`
-- `workspace.create`, `workspace.close`, `workspace.select`, `workspace.rename`, `workspace.list`
+- `workspace.create`, `workspace.close`, `workspace.select`, `workspace.rename`, `workspace.list`, `workspace.current`
 - `pane.split`, `pane.close`, `pane.focus`, `pane.zoom`, `pane.list`
 - `surface.create`, `surface.close`, `surface.focus`, `surface.rename`, `surface.list`
 - `surface.send_text`, `surface.send_key`, `surface.read_text`, `surface.trigger_flash`
@@ -378,6 +378,10 @@ wmux new-window | list-windows | focus-window <id>
 # Workspaces
 wmux new-workspace [--title T] [--shell S] [--cwd D]   # --shell accepts args: --shell "ssh user@host"
 wmux close-workspace | select-workspace | rename-workspace | list-workspaces
+wmux current-workspace [--surface <id>]                # alias: whoami — the caller's OWN
+                                       # workspace {id,title,cwd,shell,surfaceId} (issue #5).
+                                       # Explicit error on an unknown surface — never the
+                                       # focused workspace, which is what `isActive` gets wrong
 wmux ssh [ssh options] <user@host> [--title T]         # remote terminal in a new workspace (issue #78)
 
 # Remote wmux management (issue #78): drive another machine's wmux over an SSH tunnel
