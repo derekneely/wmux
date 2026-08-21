@@ -65,6 +65,18 @@ export function initPipeBridge(): void {
     return store.activeWorkspaceId ?? null;
   };
 
+  // The caller's OWN workspace, identity included (issue #5). Main injects the
+  // workspace id it resolved from the caller's WMUX_SURFACE_ID (callerScoped),
+  // so there is deliberately NO fallback to the active workspace here: an agent
+  // in a background pane has to be able to tell "I don't know" from "it's this
+  // one", which is exactly the trap `list-workspaces`' `isActive` sets.
+  w.__wmux_currentWorkspace = (workspaceId: string, surfaceId: string) => {
+    if (!workspaceId) return null;
+    const ws = useStore.getState().workspaces.find(x => x.id === workspaceId);
+    if (!ws) return null;
+    return { id: ws.id, title: ws.title, cwd: ws.cwd, shell: ws.shell, surfaceId: surfaceId || null };
+  };
+
   // All browser surface ids in a workspace. Main adopts an unbound one for a
   // caller (or creates a fresh pane) so each agent gets its own browser (#62).
   w.__wmux_listBrowserSurfaces = (workspaceId: string) => {
