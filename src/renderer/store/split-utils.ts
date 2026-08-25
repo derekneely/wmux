@@ -253,6 +253,26 @@ export function freezeSurfaceCwds(tree: SplitNode): SplitNode {
   };
 }
 
+/**
+ * Persistence pass: an explorer preview tab is disposable by definition, so it
+ * does not survive a restart. A DIRTY one is promoted to a kept tab first,
+ * preserving the existing "unsaved edit survives a restart, still marked
+ * unsaved" guarantee — only the ephemeral FLAG is dropped, never a buffer.
+ */
+export function dropEphemeralSurfaces(tree: SplitNode): SplitNode {
+  if (tree.type === 'leaf') {
+    const surfaces = tree.surfaces
+      .filter((s) => !s.ephemeral || s.markdownDirty)
+      .map(({ ephemeral, ...rest }) => rest as SurfaceRef);
+    const activeSurfaceIndex = Math.max(0, Math.min(tree.activeSurfaceIndex, surfaces.length - 1));
+    return { ...tree, surfaces, activeSurfaceIndex };
+  }
+  return {
+    ...tree,
+    children: [dropEphemeralSurfaces(tree.children[0]), dropEphemeralSurfaces(tree.children[1])],
+  };
+}
+
 // ─── patchLeafPrimarySurface (saved-layout pane editing) ─────────────────────
 // This lets the Saved Layouts settings UI set `startupCommands`/ `shell` 
 // directly on a stored template's pane, same fields Quick Launch

@@ -3,7 +3,7 @@ import { useStore } from './store';
 import { PaneId, SurfaceId, SurfaceRef, WorkspaceId, WorkspaceInfo, SplitNode } from '../shared/types';
 import { cwdReportPatch } from '../shared/paths';
 import SplitContainer from './components/SplitPane/SplitContainer';
-import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface, freezeSurfaceCwds, buildDefaultSplitTree } from './store/split-utils';
+import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface, freezeSurfaceCwds, dropEphemeralSurfaces, buildDefaultSplitTree } from './store/split-utils';
 import { resolveDefaultSplitTree } from './store/workspace-slice';
 import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from './dev-ports';
 import { aggregateProgress } from './store/progress-slice';
@@ -786,9 +786,12 @@ export default function App() {
             // Per-tab directories, frozen at save time (issue #134): ws.cwd above
             // is a single value for the whole workspace, so on its own it sends
             // every restored terminal to the same place.
-            splitTree: freezeSurfaceCwds(ws.splitTree),
+            splitTree: dropEphemeralSurfaces(freezeSurfaceCwds(ws.splitTree)),
             browserUrl: ws.browserUrl,
             browserWidth: ws.browserWidth,
+            explorerOpen: ws.explorerOpen,
+            explorerWidth: ws.explorerWidth,
+            explorerExpanded: ws.explorerExpanded,
           })),
         }],
       };
@@ -856,9 +859,12 @@ export default function App() {
         // See the auto-save path below — a named session is the case #134
         // reported, where losing a worktree's drive makes the session
         // unidentifiable after a restore.
-        splitTree: freezeSurfaceCwds(ws.splitTree),
+        splitTree: dropEphemeralSurfaces(freezeSurfaceCwds(ws.splitTree)),
         browserUrl: ws.browserUrl || '',
         browserWidth: ws.browserWidth,
+        explorerOpen: ws.explorerOpen,
+        explorerWidth: ws.explorerWidth,
+        explorerExpanded: ws.explorerExpanded,
       })),
       sidebarWidth: sidebarWidthRef.current,
       terminalPrefs: { ...state.terminalPrefs },

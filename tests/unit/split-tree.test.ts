@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createLeaf, splitNode, removeLeaf, findLeaf, updateRatio, getAllPaneIds, buildGridLayout, replaceSoleTerminalSurface, freezeSurfaceCwds, instantiateLayout, buildDefaultSplitTree, patchLeafPrimarySurface, mergeStartupCommands } from '../../src/renderer/store/split-utils';
+import { createLeaf, splitNode, removeLeaf, findLeaf, updateRatio, getAllPaneIds, buildGridLayout, replaceSoleTerminalSurface, freezeSurfaceCwds, instantiateLayout, buildDefaultSplitTree, patchLeafPrimarySurface, mergeStartupCommands, dropEphemeralSurfaces } from '../../src/renderer/store/split-utils';
 
 describe('split-tree', () => {
   it('creates a leaf node', () => {
@@ -413,5 +413,42 @@ describe('instantiateLayout', () => {
     const b = instantiateLayout(template) as any;
     expect(a.paneId).not.toBe(b.paneId);
     expect(a.surfaces[0].id).not.toBe(b.surfaces[0].id);
+  });
+});
+
+describe('dropEphemeralSurfaces', () => {
+  const leaf = (surfaces: any[]): any => ({
+    type: 'leaf', paneId: 'pane-1', surfaces, activeSurfaceIndex: surfaces.length - 1,
+  });
+
+  it('removes a clean ephemeral surface', () => {
+    const out: any = dropEphemeralSurfaces(leaf([
+      { id: 'surf-1', type: 'terminal' },
+      { id: 'surf-2', type: 'markdown', ephemeral: true },
+    ]));
+    expect(out.surfaces.map((s: any) => s.id)).toEqual(['surf-1']);
+    expect(out.activeSurfaceIndex).toBe(0);
+  });
+
+  it('keeps a DIRTY ephemeral surface but strips the flag', () => {
+    const out: any = dropEphemeralSurfaces(leaf([
+      { id: 'surf-1', type: 'markdown', ephemeral: true, markdownDirty: true, markdownContent: 'edited' },
+    ]));
+    expect(out.surfaces).toHaveLength(1);
+    expect(out.surfaces[0].ephemeral).toBeUndefined();
+    expect(out.surfaces[0].markdownDirty).toBe(true);
+    expect(out.surfaces[0].markdownContent).toBe('edited');
+  });
+
+  it('recurses into split nodes', () => {
+    const out: any = dropEphemeralSurfaces({
+      type: 'split', direction: 'horizontal', ratio: 0.5,
+      children: [
+        leaf([{ id: 'a', type: 'markdown', ephemeral: true }]),
+        leaf([{ id: 'b', type: 'terminal' }]),
+      ],
+    } as any);
+    expect(out.children[0].surfaces).toHaveLength(0);
+    expect(out.children[1].surfaces).toHaveLength(1);
   });
 });

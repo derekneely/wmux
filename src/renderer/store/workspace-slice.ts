@@ -235,6 +235,9 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice> = (set, get) => 
       posixCwd: config.posixCwd ?? (config.cwd && isPosixPath(config.cwd) ? config.cwd : undefined),
       browserUrl: config.browserUrl,
       browserWidth: config.browserWidth,
+      explorerOpen: config.explorerOpen,
+      explorerWidth: config.explorerWidth,
+      explorerExpanded: config.explorerExpanded,
     }));
 
     // IDs are regenerated above, so a saved activeWorkspaceId is meaningless —
