@@ -111,10 +111,49 @@ export function flattenVisible(
  *
  * `|` is the separator (not the NUL a prior version used, which made the file
  * register as binary to git). `|` is safe: `surfaceId` is a branded
- * `surf-{uuid}` and cannot contain it; `relPath` is POSIX-normalized by
- * joinRel and never carries one; `root` is an absolute Windows path, and `|`
- * is a reserved character Windows paths can never contain.
+ * `surf-{uuid}` and cannot contain it; the `variant` values are POSIX
+ * rel-paths (normalized by joinRel, never carrying one) or a boolean's
+ * spelling; `root` is an absolute Windows path, and `|` is a reserved
+ * character Windows paths can never contain.
+ *
+ * `variant` is deliberately untyped beyond `string`: the key only has to be an
+ * identity, and call sites pass whatever else distinguishes one in-flight
+ * request from another (a rel-path, or `String(showHidden)`).
  */
-export function responseKey(surfaceId: string, root: string, relPath: string): string {
-  return `${surfaceId}|${root}|${relPath}`;
+export function responseKey(surfaceId: string, root: string, variant: string): string {
+  return `${surfaceId}|${root}|${variant}`;
+}
+
+// ─── Absolute paths ──────────────────────────────────────────────────────────
+// Enumeration only ever needs a surfaceId and a rel-path — main owns the root.
+// But every ACTION on a listed entry (open, reveal, open-in-default-app, copy
+// path) needs a real absolute Windows path, and the renderer is what builds it.
+// These two helpers are the whole of that construction, kept pure and here
+// rather than inline in the panel because getting the root wrong is silent:
+// the tree still paints, and only the clicks fail.
+
+/**
+ * Which root absolute paths are built from.
+ *
+ * `resolvedRoot` is `ExplorerListOk.root` — the absolute, realpath'd Windows
+ * path main itself listed. `reportedCwd` is the verbatim `report_pwd`
+ * argument, which is a Windows path only by luck: the bash integration reports
+ * `$(pwd)`, i.e. `/c/Users/...`, and a pwsh cwd can be a junction, an 8.3
+ * short name, or cased differently from the real directory. Main normalizes
+ * all of those for ENUMERATION, so a tree built on the reported cwd looks
+ * perfectly healthy while every path built from it is unopenable.
+ *
+ * So the resolved root always wins. The reported cwd is a fallback for exactly
+ * one window — before the first root reply has landed — where it is that or
+ * nothing.
+ */
+export function pathRoot(resolvedRoot: string | null | undefined, reportedCwd: string): string {
+  return resolvedRoot || reportedCwd;
+}
+
+/** Join a POSIX rel-path onto an absolute Windows root. */
+export function toAbsolutePath(root: string, relPath: string): string {
+  const base = root.replace(/[\\/]+$/, '');
+  const tail = relPath.replace(/\//g, '\\');
+  return tail ? `${base}\\${tail}` : base;
 }

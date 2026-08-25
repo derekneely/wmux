@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import {
   joinRel, sortEntries, toggleExpanded, pruneExpanded, flattenVisible, responseKey,
+  pathRoot, toAbsolutePath,
 } from '../../src/renderer/components/Explorer/explorer-state';
 
 const dir = (name: string): any => ({ name, kind: 'dir', size: 0, mtimeMs: 0, viewable: false });
@@ -93,5 +96,95 @@ describe('responseKey', () => {
     expect(responseKey('surf-1', 'C:\\other', 'docs')).not.toBe(base);
     expect(responseKey('surf-1', 'C:\\repo', 'src')).not.toBe(base);
     expect(responseKey('surf-1', 'C:\\repo', 'docs')).toBe(base);
+  });
+});
+
+// ─── Absolute path construction (the Git Bash / junction seam) ───────────────
+// The renderer sends main a surfaceId and a rel-path, and main answers with the
+// entries PLUS the absolute root it resolved. Building paths from the REPORTED
+// cwd instead fails silently: enumeration still works (main normalizes on the
+// way in), and only the clicks — open, reveal, open-in-default-app, copy path —
+// die. String.raw throughout, so what is written is what is compared.
+
+describe('pathRoot', () => {
+  // The whole bug in one assertion. The bash integration reports `$(pwd)`.
+  it('prefers the RESOLVED root over a Git Bash reported cwd', () => {
+    const reported = '/c/Users/x/repo';
+    const resolved = String.raw`C:\Users\x\repo`;
+    expect(pathRoot(resolved, reported)).toBe(resolved);
+    expect(toAbsolutePath(pathRoot(resolved, reported), 'docs/README.md'))
+      .toBe(String.raw`C:\Users\x\repo\docs\README.md`);
+  });
+
+  it('does not produce the mixed-separator path the reported cwd would', () => {
+    const fromReported = toAbsolutePath('/c/Users/x/repo', 'README.md');
+    const fromResolved = toAbsolutePath(
+      pathRoot(String.raw`C:\Users\x\repo`, '/c/Users/x/repo'), 'README.md',
+    );
+    // What shipped: a string no Windows API accepts.
+    expect(fromReported).toBe(String.raw`/c/Users/x/repo\README.md`);
+    expect(fromResolved).not.toBe(fromReported);
+    expect(fromResolved.startsWith('C:')).toBe(true);
+  });
+
+  // The subtler PowerShell half: a junction, an 8.3 short name, or different
+  // casing. Main returns the realpath; keeping the alias means the path saved
+  // and revealed is not the path listed.
+  it('prefers the realpath over an aliased Windows cwd', () => {
+    expect(pathRoot(String.raw`C:\Users\x\repo`, String.raw`C:\junction\repo`))
+      .toBe(String.raw`C:\Users\x\repo`);
+    expect(pathRoot(String.raw`C:\Users\Derek Neely\repo`, String.raw`C:\Users\DEREKN~1\repo`))
+      .toBe(String.raw`C:\Users\Derek Neely\repo`);
+  });
+
+  // Only until the first root reply lands — in that window it is the reported
+  // cwd or nothing at all.
+  it('falls back to the reported cwd before any root reply has arrived', () => {
+    const reported = String.raw`C:\Users\x\repo`;
+    expect(pathRoot(null, reported)).toBe(reported);
+    expect(pathRoot(undefined, reported)).toBe(reported);
+    // An empty resolved root is not a root either.
+    expect(pathRoot('', reported)).toBe(reported);
+  });
+});
+
+describe('toAbsolutePath', () => {
+  it('converts POSIX rel-paths to backslashes and strips a trailing root separator', () => {
+    expect(toAbsolutePath(String.raw`C:\repo`, 'a/b/c.md')).toBe(String.raw`C:\repo\a\b\c.md`);
+    // Not String.raw here: a raw template may not END in a backslash.
+    expect(toAbsolutePath('C:\\repo\\', 'a.md')).toBe(String.raw`C:\repo\a.md`);
+    expect(toAbsolutePath(String.raw`C:\repo//`, 'a.md')).toBe(String.raw`C:\repo\a.md`);
+  });
+
+  it('returns the root itself for an empty rel-path, with no dangling separator', () => {
+    expect(toAbsolutePath(String.raw`C:\repo`, '')).toBe(String.raw`C:\repo`);
+  });
+});
+
+// ─── Wiring pin ──────────────────────────────────────────────────────────────
+// The helpers above are only worth anything if the panel actually uses them.
+// The failure mode is invisible at runtime (the tree paints; only the clicks
+// die) and this project has no DOM test harness, so pin it at the source —
+// the same tactic the opencode-plugin export-count test uses.
+describe('ExplorerPanel wiring', () => {
+  const src = readFileSync(
+    resolve(__dirname, '../../src/renderer/components/Explorer/ExplorerPanel.tsx'),
+    'utf-8',
+  );
+
+  it('stores the resolved root from the root reply', () => {
+    expect(src).toContain('setResolvedRoot(result.root)');
+  });
+
+  it('builds absolute paths from the resolved root, never the reported cwd', () => {
+    expect(src).toContain('pathRoot(resolvedRoot, root)');
+    expect(src).toContain('toAbsolutePath(absRoot, relPath)');
+    // No hand-rolled concatenation onto the reported cwd left anywhere.
+    expect(src).not.toMatch(/\$\{root\.replace/);
+  });
+
+  it('keys the expansion map off the resolved root', () => {
+    expect(src).toContain('[absRoot]: next');
+    expect(src).toContain('expandedByRoot[absRoot]');
   });
 });

@@ -22,6 +22,22 @@ export function ExplorerTree({
   // click both selects AND focuses).
   const [focusedIndex, setFocusedIndex] = useState(0);
   const rowEls = useRef<(HTMLDivElement | null)[]>([]);
+  // Did the pending focusedIndex change come from a key press?
+  //
+  // The roving index moves for three reasons — a key press, a click, and the
+  // bounds clamp below — but only ONE of them may pull real DOM focus. A click
+  // must not: the mousedown handler already preventDefaults so a click cannot
+  // take focus off the terminal, and calling .focus() from the effect a moment
+  // later undid exactly that (click a file to preview it, keep typing, and the
+  // keystrokes went into the tree). The clamp must not either, for the same
+  // reason — nor may the initial mount, which would steal focus the instant the
+  // panel opens.
+  //
+  // Setting a flag rather than skipping the index update is what keeps the two
+  // states honest: a click still moves the tab stop onto the clicked row, so
+  // tabbing back into the tree resumes from where the user last pointed. Only
+  // the .focus() call is gated.
+  const focusFromKeyboard = useRef(false);
 
   // Rows change shape on every expand/collapse/refresh (new array from
   // flattenVisible). Keep the roving index inside bounds rather than
@@ -31,26 +47,36 @@ export function ExplorerTree({
     if (focusedIndex > rows.length - 1) setFocusedIndex(rows.length - 1);
   }, [rows, focusedIndex]);
 
-  // Move actual DOM focus to match focusedIndex whenever it changes via
-  // keyboard nav (a mouse click focuses its own row natively, this handles
-  // the arrow/Home/End/Enter-driven moves that never touch the mouse).
+  // Move actual DOM focus to match focusedIndex, but ONLY for the
+  // arrow/Home/End-driven moves — see focusFromKeyboard above.
   useEffect(() => {
+    if (!focusFromKeyboard.current) return;
+    focusFromKeyboard.current = false;
     rowEls.current[focusedIndex]?.focus();
   }, [focusedIndex]);
+
+  // The only mover that arms the flag. Arming it at the TOP of handleKeyDown
+  // instead would leave it set for outcomes that never change the index
+  // (`activate`, `none`), and the next clamp or click would then consume the
+  // stale arm and steal focus after all.
+  const moveFocusByKey = (index: number): void => {
+    focusFromKeyboard.current = true;
+    setFocusedIndex(index);
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const outcome = computeKeyNavOutcome(rows, focusedIndex, e.key);
     switch (outcome.type) {
       case 'move': {
         e.preventDefault();
-        setFocusedIndex(outcome.index);
+        moveFocusByKey(outcome.index);
         onSelect(rows[outcome.index]);
         break;
       }
       case 'expand':
       case 'collapse': {
         e.preventDefault();
-        setFocusedIndex(outcome.index);
+        moveFocusByKey(outcome.index);
         onToggleDir(rows[outcome.index].relPath);
         break;
       }
@@ -112,9 +138,14 @@ export function ExplorerTree({
             // The row itself IS keyboard-focusable (roving tabIndex above),
             // so a click also moves the roving index onto the clicked row —
             // otherwise a click could select a row while leaving a stale
-            // keyboard focus target.
+            // keyboard focus target. Moving the tab stop is all it does: the
+            // roving-focus effect deliberately does NOT call .focus() for a
+            // click, or the preventDefault above would be undone a tick later.
             onMouseDown={(e) => e.preventDefault()}
             onClick={(e) => {
+              // Disarm: a key press whose outcome left the index unchanged
+              // never reached the effect, so the arm could still be pending.
+              focusFromKeyboard.current = false;
               setFocusedIndex(index);
               onSelect(row);
               if (isDir) onToggleDir(row.relPath);

@@ -97,7 +97,17 @@ export interface ExplorerEntry {
 }
 
 export interface ExplorerListOk {
-  /** Absolute root main resolved for this surface — display only. */
+  /**
+   * Absolute, realpath'd Windows root main resolved for this surface.
+   *
+   * NOT display-only: this is the ONLY spelling of the root the renderer may
+   * build absolute paths from. The cwd a shell reports is not usable for that
+   * — Git Bash reports `/c/Users/...`, and a PowerShell cwd can be a junction,
+   * an 8.3 short name, or differently cased. Main normalizes and realpaths all
+   * of those on the way in, so enumeration works either way, but a path the
+   * renderer concatenates from the REPORTED cwd is a path `markdown.readFile`,
+   * `markdown.reveal`, `markdown.openInApp` and the clipboard all choke on.
+   */
   root: string;
   /** The listed directory relative to `root`, POSIX separators, '' for the root. */
   relPath: string;

@@ -136,3 +136,83 @@ describe('openInPreviewTab', () => {
     expect(md[0].markdownFilePath).toBe('C:\\repo\\b.md');
   });
 });
+
+// ─── Failure reporting ───────────────────────────────────────────────────────
+// A bare `if (!read || 'error' in read) return;` is what made the Git Bash
+// absolute-path bug invisible: every click was a no-op with no message. It also
+// hides the ordinary case of clicking a file that was deleted out from under
+// the tree. The failure is now returned as an explorer error CODE — never the
+// sibling `error` string, which stays English for main-process callers.
+describe('openInPreviewTab failure reporting', () => {
+  it('returns null on success', async () => {
+    const { ws, pane } = setup();
+    await expect(openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false }))
+      .resolves.toBeNull();
+  });
+
+  it('maps a not_found read onto the explorer code of the same name', async () => {
+    const { ws, pane } = setup();
+    readFile.mockResolvedValue({ error: 'File not found', code: 'not_found' });
+    await expect(openInPreviewTab(ws, pane, 'C:\\repo\\gone.md', 'gone.md', { keep: false }))
+      .resolves.toBe('not_found');
+  });
+
+  it('maps the markdown-only codes onto invalid_path', async () => {
+    const { ws, pane } = setup();
+    for (const code of ['no_path', 'unsupported_type', 'symlink', 'not_regular_file']) {
+      readFile.mockResolvedValue({ error: 'nope', code });
+      await expect(openInPreviewTab(ws, pane, 'C:\\repo\\x.md', 'x.md', { keep: false }))
+        .resolves.toBe('invalid_path');
+    }
+  });
+
+  it('falls back to read_failed for an unknown or absent code', async () => {
+    const { ws, pane } = setup();
+    readFile.mockResolvedValue({ error: 'boom', code: 'something_new' });
+    await expect(openInPreviewTab(ws, pane, 'C:\\repo\\x.md', 'x.md', { keep: false }))
+      .resolves.toBe('read_failed');
+    readFile.mockResolvedValue(undefined);
+    await expect(openInPreviewTab(ws, pane, 'C:\\repo\\y.md', 'y.md', { keep: false }))
+      .resolves.toBe('read_failed');
+  });
+
+  it('leaves no empty tab behind when the read fails', async () => {
+    const { ws, pane } = setup();
+    readFile.mockResolvedValue({ error: 'File not found', code: 'not_found' });
+    await openInPreviewTab(ws, pane, 'C:\\repo\\gone.md', 'gone.md', { keep: false });
+    expect(surfacesOf(ws).filter((s) => s.type === 'markdown')).toHaveLength(0);
+  });
+
+  it('reports NOTHING for an open a newer click superseded', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\first.md', 'first.md', { keep: false });
+
+    let resolveA!: (value: any) => void;
+    readFile.mockReset();
+    readFile.mockImplementation(async (filePath: string) => {
+      if (filePath === 'C:\\repo\\a.md') return new Promise((r) => { resolveA = r; });
+      return { filePath, content: '# b', mtimeMs: 1 };
+    });
+    const p1 = openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const p2 = openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false });
+    resolveA({ filePath: 'C:\\repo\\a.md', content: '# a', mtimeMs: 1 });
+    // Superseded is not a failure — flashing an error for a file the user has
+    // already navigated away from would be noise.
+    expect(await p1).toBeNull();
+    expect(await p2).toBeNull();
+  });
+
+  it('does not wedge later opens behind a rejected one', async () => {
+    const { ws, pane } = setup();
+    readFile.mockRejectedValueOnce(new Error('ipc blew up'));
+    const bad = openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    await expect(bad).rejects.toThrow('ipc blew up');
+    // The next open must still run rather than inheriting the rejection.
+    readFile.mockImplementation(async (filePath: string) => ({
+      filePath, content: '# ok', mtimeMs: 1,
+    }));
+    await expect(openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false }))
+      .resolves.toBeNull();
+    expect(surfacesOf(ws).some((s) => s.markdownFilePath === 'C:\\repo\\b.md')).toBe(true);
+  });
+});
