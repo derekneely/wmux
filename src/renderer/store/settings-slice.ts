@@ -185,7 +185,9 @@ export type ShortcutAction =
   // ─── issue #116 ───────────────────────────────────────────────────────────
   | 'toggleMarkdownSource'
   // ─── issue #175 ───────────────────────────────────────────────────────────
-  | 'resetTerminal';
+  | 'resetTerminal'
+  // ─── file explorer panel ──────────────────────────────────────────────────
+  | 'toggleExplorer';
 
 // ─── Default shortcuts ────────────────────────────────────────────────────────
 
@@ -257,6 +259,12 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, ShortcutBinding> = {
   // since the users who need this binding are the ones already fighting their
   // shell.
   resetTerminal:          { key: 'r', ctrl: true, shift: true },
+  // ─── file explorer panel ─────────────────────────────────────────────────
+  // Ctrl+Shift+E is toggleMarkdownSource (#116), so the explorer takes X.
+  // Shift-modified, so isSafeToIntercept needs no change and bare Ctrl+X still
+  // reaches the terminal. Users wanting VS Code muscle memory can swap the two
+  // in Settings → Keyboard, which is what #202/#203 landed for.
+  toggleExplorer:    { key: 'x', ctrl: true, shift: true },
 };
 
 // ─── Sidebar settings ─────────────────────────────────────────────────────────

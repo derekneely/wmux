@@ -138,6 +138,7 @@ export function useKeyboardShortcuts(
   onToggleNotifications?: () => void,
   onFocusPane?: (paneId: PaneId) => void,
   onToggleZoom?: () => void,
+  onToggleExplorer?: () => void,
 ): void {
   const {
     shortcuts,
@@ -354,6 +355,7 @@ export function useKeyboardShortcuts(
         if (leaf && existingIdx >= 0) st.selectSurface(activeWorkspaceId, focusedPaneId, existingIdx);
         else st.addSurface(activeWorkspaceId, focusedPaneId, 'diff');
       },
+      toggleExplorer: () => onToggleExplorer?.(),
       // commandPalette is opened by App.tsx's own listener; keep a no-op so we
       // still preventDefault on the combo. find/copyMode are short-circuited above.
       commandPalette: () => {},
@@ -436,6 +438,7 @@ export function useKeyboardShortcuts(
     onToggleNotifications,
     onFocusPane,
     onToggleZoom,
+    onToggleExplorer,
     t,
   ]);
 

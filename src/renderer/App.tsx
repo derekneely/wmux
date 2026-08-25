@@ -18,6 +18,7 @@ import ShortcutCheatSheet from './components/CheatSheet/ShortcutCheatSheet';
 import ConfirmCloseDialog from './components/ConfirmCloseDialog';
 import ConfirmCloseSurfaceDialog from './components/ConfirmCloseSurfaceDialog';
 import BrowserPane from './components/Browser/BrowserPane';
+import { ExplorerPanel } from './components/Explorer/ExplorerPanel';
 import Tutorial from './components/Tutorial/Tutorial';
 import SplitPreviewOverlay from './components/SplitPane/SplitPreviewOverlay';
 import { initPipeBridge } from './pipe-bridge';
@@ -466,6 +467,9 @@ export default function App() {
   const [browserOpen, setBrowserOpen] = useState(() => useStore.getState().browserPrefs.openOnStartup);
   const [browserWidth, setBrowserWidth] = useState(420);
   const [isResizingBrowser, setIsResizingBrowser] = useState(false);
+  const [explorerOpen, setExplorerOpen] = useState(false);
+  const [explorerWidth, setExplorerWidth] = useState(260);
+  const [isResizingExplorer, setIsResizingExplorer] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [notifPanelOpen, setNotifPanelOpen] = useState(false);
   // Per-workspace hook activity: workspaceId → { lastTool, toolCount, lastSeen }
@@ -805,6 +809,25 @@ export default function App() {
   // During drag use live browserWidth state; otherwise use the persisted value from the
   // workspace (falls back to browserWidth for workspaces that have never been resized).
   const displayBrowserWidth = isResizingBrowser ? browserWidth : (activeWorkspace?.browserWidth ?? browserWidth);
+  const displayExplorerWidth = isResizingExplorer
+    ? explorerWidth
+    : (activeWorkspace?.explorerWidth ?? explorerWidth);
+
+  // Open/closed is per-workspace and persisted, so the toggle writes both.
+  const handleToggleExplorer = useCallback((next?: boolean) => {
+    setExplorerOpen((prev) => {
+      const value = next ?? !prev;
+      if (activeWorkspaceId) {
+        updateWorkspaceMetadata(activeWorkspaceId, { explorerOpen: value });
+      }
+      return value;
+    });
+  }, [activeWorkspaceId, updateWorkspaceMetadata]);
+
+  // Restore per-workspace on switch.
+  useEffect(() => {
+    setExplorerOpen(!!activeWorkspace?.explorerOpen);
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -1069,7 +1092,7 @@ export default function App() {
     if (!paneIds.includes(zoomedPaneId)) setZoomedPaneId(null);
   }, [zoomedPaneId, activeWorkspace]);
 
-  useKeyboardShortcuts(focusedPaneId, setSettingsOpen, () => setBrowserOpen(o => !o), handleToggleNotifPanel, setFocusedPaneId, handleToggleZoom);
+  useKeyboardShortcuts(focusedPaneId, setSettingsOpen, () => setBrowserOpen(o => !o), handleToggleNotifPanel, setFocusedPaneId, handleToggleZoom, () => handleToggleExplorer());
 
   // Derive a title for the titlebar: active workspace title or blank
   const titlebarText = activeWorkspace?.title ?? '';
@@ -1199,6 +1222,49 @@ export default function App() {
           ))}
         </div>
 
+        {/* Right: file explorer panel — before the browser so the order is
+            terminals │ explorer │ browser. The explorer sits adjacent to the
+            terminals because that is what it acts on. */}
+        {explorerOpen && (
+          <>
+            <div
+              className="explorer-resize-handle"
+              style={{ width: 4, cursor: 'col-resize', flexShrink: 0, position: 'relative' }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizingExplorer(true);
+                const startX = e.clientX;
+                const startWidth = activeWorkspace?.explorerWidth ?? explorerWidth;
+                setExplorerWidth(startWidth);
+                let finalWidth = startWidth;
+                const onMove = (ev: MouseEvent) => {
+                  const delta = startX - ev.clientX;
+                  finalWidth = Math.max(200, Math.min(window.innerWidth - 400, startWidth + delta));
+                  setExplorerWidth(finalWidth);
+                };
+                const onUp = () => {
+                  setIsResizingExplorer(false);
+                  document.removeEventListener('mousemove', onMove);
+                  document.removeEventListener('mouseup', onUp);
+                  // Commit on mouse-up only — a store write per mousemove is
+                  // what browserWidth avoids the same way.
+                  if (activeWorkspaceId) {
+                    updateWorkspaceMetadata(activeWorkspaceId, { explorerWidth: finalWidth });
+                  }
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+              }}
+            />
+            <div style={{ width: displayExplorerWidth, flexShrink: 0, overflow: 'hidden', position: 'relative' }}>
+              {isResizingExplorer && (
+                <div style={{ position: 'absolute', inset: 0, zIndex: 10, cursor: 'col-resize', background: 'transparent' }} />
+              )}
+              <ExplorerPanel onClose={() => handleToggleExplorer(false)} focusedPaneId={focusedPaneId} />
+            </div>
+          </>
+        )}
+
         {/* Right: browser panel */}
         {browserOpen && (
           <>
@@ -1288,6 +1354,7 @@ export default function App() {
         <CommandPalette
           onClose={handlePaletteClose}
           onAction={handlePaletteAction}
+          onToggleExplorer={() => handleToggleExplorer()}
         />
       )}
 

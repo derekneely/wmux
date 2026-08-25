@@ -10,6 +10,7 @@ import '../../styles/command-palette.css';
 interface CommandPaletteProps {
   onClose: () => void;
   onAction: (action: string) => void;
+  onToggleExplorer?: () => void;
 }
 
 interface PaletteItem {
@@ -50,7 +51,7 @@ function fuzzyMatch(needle: string, haystack: string): boolean {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function CommandPalette({ onClose, onAction }: CommandPaletteProps) {
+export default function CommandPalette({ onClose, onAction, onToggleExplorer }: CommandPaletteProps) {
   const {
     shortcuts, workspaces, activeWorkspaceId, selectWorkspace,
     savedLayouts, createWorkspace, saveCurrentLayoutAsPreset,
@@ -100,6 +101,18 @@ export default function CommandPalette({ onClose, onAction }: CommandPaletteProp
         },
       });
     }
+
+    // Explorer toggle. Self-executing like the UI-mode toggle above, for the
+    // same reason: the generic Actions path only console.logs.
+    items.push({
+      id: 'command:toggle-explorer',
+      label: t('explorer.title', 'Explorer'),
+      category: t('palette.category.commands'),
+      action: () => {
+        onToggleExplorer?.();
+        onClose();
+      },
+    });
 
     // Category: Commands — one-off actions not bound to a shortcut.
     // "Open Markdown File…" picks a file via a native dialog and renders it in a
@@ -198,7 +211,7 @@ export default function CommandPalette({ onClose, onAction }: CommandPaletteProp
     return items;
   }, [
     shortcuts, workspaces, activeWorkspaceId, selectWorkspace, onAction, onClose, t,
-    savedLayouts, createWorkspace, saveCurrentLayoutAsPreset,
+    savedLayouts, createWorkspace, saveCurrentLayoutAsPreset, onToggleExplorer,
   ]);
 
   // Filter based on query

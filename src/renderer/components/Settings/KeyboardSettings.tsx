@@ -67,6 +67,7 @@ export const ACTION_LABELS: Record<ShortcutAction, string> = {
   markWorkspaceRead: 'Mark workspace read',
   toggleShortcutCheatSheet: 'Shortcut cheat-sheet',
   resetTerminal: 'Reset terminal state',
+  toggleExplorer: 'Toggle file explorer',
 };
 
 /** Translated label for an action, falling back to the English `ACTION_LABELS` map. */
@@ -95,7 +96,7 @@ export const CATEGORY: Partial<Record<ShortcutAction, string>> = {
   newWindow: 'Workspaces', closeWindow: 'Workspaces',
   newSurface: 'Tabs', nextSurface: 'Tabs', prevSurface: 'Tabs', reopenClosedSurface: 'Tabs',
   renameSurface: 'Tabs', openMarkdownPanel: 'Tabs', openDiffPanel: 'Tabs',
-  toggleMarkdownSource: 'Tabs',
+  toggleMarkdownSource: 'Tabs', toggleExplorer: 'Tabs',
   splitRight: 'Panes', splitDown: 'Panes', splitBrowserRight: 'Panes', splitBrowserDown: 'Panes',
   focusLeft: 'Panes', focusRight: 'Panes', focusUp: 'Panes', focusDown: 'Panes',
   resizePaneLeft: 'Panes', resizePaneRight: 'Panes', resizePaneUp: 'Panes', resizePaneDown: 'Panes',
