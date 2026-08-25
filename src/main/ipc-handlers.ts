@@ -671,7 +671,18 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   // would simply pass 'C:\'.
   ipcMain.handle(
     IPC_CHANNELS.EXPLORER_LIST_DIR,
-    async (_event, surfaceId: string, relPath: unknown, opts?: { showHidden?: boolean }) => {
+    async (event, surfaceId: unknown, relPath: unknown, opts?: { showHidden?: boolean }) => {
+      // Same ownership gate every other surface-addressed handler in this file
+      // uses: a window may only ask about a live surface it owns. Not a jail
+      // escape without it (enumeration only, and only of directories some wmux
+      // pane already sits in) — but one window could enumerate another
+      // window's roots, and it is the one handler here that skipped the check.
+      // `no_root` is the reply on purpose: it is the honest, already-translated
+      // "nothing to show for this pane", and it leaks nothing about whether the
+      // surface exists elsewhere.
+      if (!ownsLiveSurface(surfaceId, event.sender)) {
+        return { error: 'No working directory reported for this pane', code: 'no_root' };
+      }
       const root = getExplorerRoot(surfaceId);
       if (!root) return { error: 'No working directory reported for this pane', code: 'no_root' };
       // A pane inside ssh reports a cwd on the OTHER machine. Listing it locally

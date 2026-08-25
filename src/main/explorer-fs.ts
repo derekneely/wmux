@@ -119,7 +119,11 @@ export async function listDir(
   // policy. Kept anyway as deliberate defensive code — it is one line, and
   // it is what stops this function from being cross-drive-unsafe should the
   // policy layer above it ever change.
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  // `rel === '..' || startsWith('..' + sep)` — NOT startsWith('..'), which also
+  // rejects a legitimately-named child like `..foo` or `...`. The user sees
+  // that as a folder in the tree that refuses to open, with no way to tell why.
+  const escapes = rel === '..' || rel.startsWith(`..${path.sep}`);
+  if (escapes || path.isAbsolute(rel)) {
     return fail('Path is outside the root', 'outside_root');
   }
   // Belt and braces for Windows spellings (8.3 short names are already gone —

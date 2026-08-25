@@ -21,6 +21,10 @@ beforeAll(() => {
   fs.writeFileSync(path.join(root, 'index.ts'), 'export {}');
   fs.writeFileSync(path.join(root, '.env'), 'SECRET=1');
   fs.writeFileSync(path.join(root, 'docs', 'guide.markdown'), 'g');
+  // A legitimately-named child whose name merely BEGINS with '..'. Nothing
+  // stops a user creating one, and the jail must not confuse it with '..'.
+  fs.mkdirSync(path.join(root, '..foo'), { recursive: true });
+  fs.writeFileSync(path.join(root, '..foo', 'inside.md'), 'i');
   fs.writeFileSync(path.join(outside, 'secret.md'), 'nope');
 });
 
@@ -88,6 +92,22 @@ describe('listDir jail', () => {
     expect(err(await listDir(root, 'docs/nested/../../../outside'))).toBe('outside_root');
   });
 
+  // The over-rejection the bare `rel.startsWith('..')` form caused: '..foo' is
+  // an ordinary child directory, not an escape. The user saw it as a folder in
+  // the tree that silently refused to open.
+  it('opens a child whose name merely BEGINS with .. rather than calling it an escape', async () => {
+    const r: any = await listDir(root, '..foo');
+    expect(r.code).toBeUndefined();
+    expect(r.relPath).toBe('..foo');
+    expect(r.entries.map((e: any) => e.name)).toContain('inside.md');
+  });
+
+  it('still rejects the real .. escapes that share that prefix', async () => {
+    expect(err(await listDir(root, '..'))).toBe('outside_root');
+    expect(err(await listDir(root, '../outside'))).toBe('outside_root');
+    expect(err(await listDir(root, '..\\outside'))).toBe('outside_root');
+  });
+
   it('rejects an absolute relPath before resolving it', async () => {
     expect(err(await listDir(root, outside))).toBe('invalid_path');
   });
@@ -122,7 +142,11 @@ describe('listDir jail', () => {
     // Self-contained: creates its own link rather than relying on
     // 'leaf-link' from the earlier test having already run, so this
     // assertion holds regardless of test order, `.only`, or concurrency.
-    fs.symlinkSync(outside, path.join(root, 'kind-check-link'), 'junction');
+    // existsSync guard: an unguarded symlinkSync throws EEXIST on a vitest
+    // --retry or --rerun (the temp root can survive), and an EEXIST here reads
+    // exactly like a real regression in listDir.
+    const linkPath = path.join(root, 'kind-check-link');
+    if (!fs.existsSync(linkPath)) fs.symlinkSync(outside, linkPath, 'junction');
     const r: any = await listDir(root, '');
     const link = r.entries.find((e: any) => e.name === 'kind-check-link');
     expect(link.kind).toBe('symlink');
@@ -173,6 +197,10 @@ describe('listDir filtering, limits and errors', () => {
     expect(docs.entries.find((e: any) => e.name === 'guide.markdown').viewable).toBe(true);
   });
 
+  // Explicit timeout: this writes 2005 files and then lstats every one of them,
+  // and it runs alongside the rest of the suite. The 15s global default is
+  // enough in isolation (~2s) but not always under full parallel load, and a
+  // timeout here reads exactly like a real truncation regression.
   it('truncates at MAX_ENTRIES', async () => {
     const big = path.join(root, 'big');
     fs.mkdirSync(big, { recursive: true });
@@ -180,7 +208,7 @@ describe('listDir filtering, limits and errors', () => {
     const r: any = await listDir(root, 'big');
     expect(r.truncated).toBe(true);
     expect(r.entries.length).toBe(MAX_ENTRIES);
-  });
+  }, 60000);
 
   it('returns not_found and not_a_directory distinctly', async () => {
     expect(err(await listDir(root, 'nope'))).toBe('not_found');

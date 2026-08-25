@@ -22,6 +22,10 @@ import { ExplorerPanel } from './components/Explorer/ExplorerPanel';
 import Tutorial from './components/Tutorial/Tutorial';
 import SplitPreviewOverlay from './components/SplitPane/SplitPreviewOverlay';
 import { initPipeBridge } from './pipe-bridge';
+import {
+  TERMINAL_MIN_WIDTH, PANEL_HANDLE_WIDTH, EXPLORER_MIN_WIDTH, BROWSER_MIN_WIDTH,
+  panelReservedWidth, clampPanelWidth,
+} from './panel-layout';
 import { setKeyRemaps } from './key-remaps';
 import { useUiTheme } from './hooks/useUiTheme';
 import { useUiMode } from './hooks/useUiMode';
@@ -39,15 +43,6 @@ import { useT } from './i18n';
 import type { TranslationKey } from './i18n';
 
 const DEFAULT_SIDEBAR_WIDTH = 240;
-// The terminal column is the only flexible member of the sidebar/terminal/
-// explorer/browser row (everything else is flexShrink:0, fixed-width). This
-// floor keeps it from being crushed to 0 by two side panels plus a wide
-// sidebar; the explorer/browser resize clamps below subtract this same
-// constant, plus the sidebar and each other's live width, so the three
-// together can't ask for more room than the row actually has. It does NOT
-// decide which panel yields first when even this isn't enough — that
-// ordering is reserved for Derek (see App.tsx's explorer-panel mount comment).
-const TERMINAL_MIN_WIDTH = 400;
 
 /** Get all surface IDs from a split tree */
 function getAllSurfaces(tree: SplitNode): string[] {
@@ -514,6 +509,19 @@ export default function App() {
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [shortcuts, commandPaletteOpen]);
+  // Viewport width as state, not a bare window.innerWidth read: the panel
+  // clamps below are render-time, and a resize (or a monitor change on a
+  // restored session) has to re-run them. Nothing else re-renders on resize.
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    // Read once on mount too: the first paint can precede the window settling
+    // into its restored bounds, and no resize event follows if it doesn't.
+    onResize();
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   // Session writes read the width through this ref, not the state value.
   // As a dependency, `sidebarWidth` re-subscribed the auto-save listener and
@@ -817,10 +825,33 @@ export default function App() {
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
   // During drag use live browserWidth state; otherwise use the persisted value from the
   // workspace (falls back to browserWidth for workspaces that have never been resized).
-  const displayBrowserWidth = isResizingBrowser ? browserWidth : (activeWorkspace?.browserWidth ?? browserWidth);
-  const displayExplorerWidth = isResizingExplorer
-    ? explorerWidth
-    : (activeWorkspace?.explorerWidth ?? explorerWidth);
+  //
+  // A persisted width is clamped AGAIN here, against the window as it is right
+  // now. The drag clamp only ever saw the monitor the drag happened on: a width
+  // chosen at 3840px comes back verbatim at 1366px, flexShrink:0, with a second
+  // unclamped panel next to it — and restore is the one path where the user did
+  // not choose the bad width. Same reservation arithmetic as the drag (see
+  // panel-layout.ts), so the two can never disagree.
+  const rawBrowserWidth = activeWorkspace?.browserWidth ?? browserWidth;
+  const rawExplorerWidth = activeWorkspace?.explorerWidth ?? explorerWidth;
+  const displayBrowserWidth = isResizingBrowser ? browserWidth : clampPanelWidth(rawBrowserWidth, {
+    reserved: panelReservedWidth({
+      sidebarWidth: sidebarVisible ? sidebarWidth : 0,
+      otherPanelOpen: explorerOpen,
+      otherPanelWidth: rawExplorerWidth,
+    }),
+    min: BROWSER_MIN_WIDTH,
+    viewportWidth,
+  });
+  const displayExplorerWidth = isResizingExplorer ? explorerWidth : clampPanelWidth(rawExplorerWidth, {
+    reserved: panelReservedWidth({
+      sidebarWidth: sidebarVisible ? sidebarWidth : 0,
+      otherPanelOpen: browserOpen,
+      otherPanelWidth: rawBrowserWidth,
+    }),
+    min: EXPLORER_MIN_WIDTH,
+    viewportWidth,
+  });
 
   // Open/closed is per-workspace and persisted, so the toggle writes both.
   const handleToggleExplorer = useCallback((next?: boolean) => {
@@ -1242,7 +1273,7 @@ export default function App() {
           <>
             <div
               className="explorer-resize-handle"
-              style={{ width: 4, cursor: 'col-resize', flexShrink: 0, position: 'relative' }}
+              style={{ width: PANEL_HANDLE_WIDTH, cursor: 'col-resize', flexShrink: 0, position: 'relative' }}
               onMouseDown={(e) => {
                 e.preventDefault();
                 setIsResizingExplorer(true);
@@ -1255,10 +1286,15 @@ export default function App() {
                   // Reserve the terminal floor, the sidebar (if visible), and
                   // the browser panel + its handle (if open) — a bare 400px
                   // ignored both and let this drag alone crush the terminal.
-                  const reserved = TERMINAL_MIN_WIDTH
-                    + (sidebarVisible ? sidebarWidth : 0)
-                    + (browserOpen ? 4 + (activeWorkspace?.browserWidth ?? browserWidth) : 0);
-                  finalWidth = Math.max(200, Math.min(window.innerWidth - reserved, startWidth + delta));
+                  // Shared with the render clamp above via panel-layout.ts.
+                  const reserved = panelReservedWidth({
+                    sidebarWidth: sidebarVisible ? sidebarWidth : 0,
+                    otherPanelOpen: browserOpen,
+                    otherPanelWidth: activeWorkspace?.browserWidth ?? browserWidth,
+                  });
+                  finalWidth = clampPanelWidth(startWidth + delta, {
+                    reserved, min: EXPLORER_MIN_WIDTH, viewportWidth: window.innerWidth,
+                  });
                   setExplorerWidth(finalWidth);
                 };
                 const onUp = () => {
@@ -1290,7 +1326,7 @@ export default function App() {
             <div
               className="browser-resize-handle"
               style={{
-                width: 4,
+                width: PANEL_HANDLE_WIDTH,
                 cursor: 'col-resize',
                 flexShrink: 0,
                 position: 'relative',
@@ -1307,10 +1343,14 @@ export default function App() {
                   // Same reservation as the explorer handle, mirrored: the
                   // terminal floor, the sidebar (if visible), and the
                   // explorer panel + its handle (if open).
-                  const reserved = TERMINAL_MIN_WIDTH
-                    + (sidebarVisible ? sidebarWidth : 0)
-                    + (explorerOpen ? 4 + (activeWorkspace?.explorerWidth ?? explorerWidth) : 0);
-                  finalWidth = Math.max(250, Math.min(window.innerWidth - reserved, startWidth + delta));
+                  const reserved = panelReservedWidth({
+                    sidebarWidth: sidebarVisible ? sidebarWidth : 0,
+                    otherPanelOpen: explorerOpen,
+                    otherPanelWidth: activeWorkspace?.explorerWidth ?? explorerWidth,
+                  });
+                  finalWidth = clampPanelWidth(startWidth + delta, {
+                    reserved, min: BROWSER_MIN_WIDTH, viewportWidth: window.innerWidth,
+                  });
                   setBrowserWidth(finalWidth);
                 };
                 const onUp = () => {
