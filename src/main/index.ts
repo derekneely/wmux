@@ -29,6 +29,7 @@ import { startOrchestrationWatcher } from './orchestration-watcher';
 import { readMarkdownFile } from './markdown-file';
 import { grantMarkdownPath, clearMarkdownGrants } from './markdown-grants';
 import { directoryFromArgv } from './shell-context-menu';
+import { reportExplorerCwd } from './explorer-roots';
 import { ensurePowerShellShim } from './powershell-shim';
 import fs from 'fs';
 import path from 'path';
@@ -705,6 +706,9 @@ app.whenReady().then(() => {
     }
     if (cmd.command === 'report_pwd' && cmd.surfaceId) {
       sshDetector.reportCwd(cmd.surfaceId, cmd.args[0] ?? '');
+      // Second consumer of the same report: the explorer panel's tree root
+      // (docs/local/specs/2026-08-25-file-explorer-design.md).
+      reportExplorerCwd(cmd.surfaceId, cmd.args[0] ?? '');
     }
     // Back at a prompt: whatever was running has exited, so any ssh session
     // the preexec hook reported is over.

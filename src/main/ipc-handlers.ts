@@ -28,6 +28,8 @@ import { CDPBridge } from './cdp-bridge';
 import { CDPProxy } from './cdp-proxy';
 import { AgentManager } from './agent-manager';
 import { saveNamedSession, loadNamedSession, listNamedSessions, deleteNamedSession, loadSession } from './session-persistence';
+import { listDir } from './explorer-fs';
+import { getExplorerRoot, forgetExplorerRoot } from './explorer-roots';
 import { sessionWindows, toRestorePayload, restoreAnswerFor } from './session-windows';
 import { loadSettings, saveSetting } from './settings-store';
 import { readConsent, updateConsent } from './agent-integration';
@@ -74,6 +76,7 @@ function forgetSurface(surfaceId: SurfaceId): void {
   surfaceOwners.delete(surfaceId);
   insertionQueue.cancel(surfaceId);
   sshDetector.forget(surfaceId);
+  forgetExplorerRoot(surfaceId);
 }
 
 function ownsLiveSurface(surfaceId: unknown, webContents: Electron.WebContents): surfaceId is SurfaceId {
@@ -661,6 +664,28 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   ipcMain.handle(IPC_CHANNELS.MARKDOWN_STAT_FILE, async (_event, filePath: string) => {
     return statMarkdownFile(filePath);
   });
+
+  // File explorer (docs/local/specs/2026-08-25-file-explorer-design.md).
+  // The renderer sends a surfaceId and a RELATIVE path; main owns the root. A
+  // renderer-supplied root would not be a jail at all — a compromised renderer
+  // would simply pass 'C:\'.
+  ipcMain.handle(
+    IPC_CHANNELS.EXPLORER_LIST_DIR,
+    async (_event, surfaceId: string, relPath: unknown, opts?: { showHidden?: boolean }) => {
+      const root = getExplorerRoot(surfaceId);
+      if (!root) return { error: 'No working directory reported for this pane', code: 'no_root' };
+      // A pane inside ssh reports a cwd on the OTHER machine. Listing it locally
+      // would show whatever coincidentally exists at that path on Windows.
+      // detect() and not refresh(): refresh() runs a Win32_Process sweep, and
+      // this handler is on the pane-switch path.
+      if (sshDetector.detect(surfaceId)) {
+        return { error: 'This pane is inside an SSH session', code: 'remote' };
+      }
+      return listDir(root.realRoot, typeof relPath === 'string' ? relPath : '', {
+        showHidden: !!opts?.showHidden,
+      });
+    },
+  );
 
   // Save in place. The path comes from the renderer's store, so it is only
   // honoured if it is in this window's grant set — see ./markdown-grants for
