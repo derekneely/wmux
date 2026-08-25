@@ -39,6 +39,15 @@ import { useT } from './i18n';
 import type { TranslationKey } from './i18n';
 
 const DEFAULT_SIDEBAR_WIDTH = 240;
+// The terminal column is the only flexible member of the sidebar/terminal/
+// explorer/browser row (everything else is flexShrink:0, fixed-width). This
+// floor keeps it from being crushed to 0 by two side panels plus a wide
+// sidebar; the explorer/browser resize clamps below subtract this same
+// constant, plus the sidebar and each other's live width, so the three
+// together can't ask for more room than the row actually has. It does NOT
+// decide which panel yields first when even this isn't enough — that
+// ordering is reserved for Derek (see App.tsx's explorer-panel mount comment).
+const TERMINAL_MIN_WIDTH = 400;
 
 /** Get all surface IDs from a split tree */
 function getAllSurfaces(tree: SplitNode): string[] {
@@ -824,10 +833,14 @@ export default function App() {
     });
   }, [activeWorkspaceId, updateWorkspaceMetadata]);
 
-  // Restore per-workspace on switch.
+  // Restore per-workspace on switch. Deps include explorerOpen itself, not just
+  // the id: session restore can set activeWorkspaceId before (or in a separate
+  // commit from) the workspace object landing in `workspaces`, so an id-only
+  // dep would sample `undefined` once and never re-fire since the id didn't
+  // change again.
   useEffect(() => {
     setExplorerOpen(!!activeWorkspace?.explorerOpen);
-  }, [activeWorkspaceId]);
+  }, [activeWorkspaceId, activeWorkspace?.explorerOpen]);
 
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -1170,7 +1183,7 @@ export default function App() {
 
         {/* Middle: terminals — ALL workspaces stay mounted, only active is visible */}
         {/* This keeps PTYs alive when switching sessions (Claude Code etc. keep running) */}
-        <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minWidth: 0 }}>
+        <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minWidth: TERMINAL_MIN_WIDTH }}>
           {customBgActive && (
             <div
               aria-hidden
@@ -1239,7 +1252,13 @@ export default function App() {
                 let finalWidth = startWidth;
                 const onMove = (ev: MouseEvent) => {
                   const delta = startX - ev.clientX;
-                  finalWidth = Math.max(200, Math.min(window.innerWidth - 400, startWidth + delta));
+                  // Reserve the terminal floor, the sidebar (if visible), and
+                  // the browser panel + its handle (if open) — a bare 400px
+                  // ignored both and let this drag alone crush the terminal.
+                  const reserved = TERMINAL_MIN_WIDTH
+                    + (sidebarVisible ? sidebarWidth : 0)
+                    + (browserOpen ? 4 + (activeWorkspace?.browserWidth ?? browserWidth) : 0);
+                  finalWidth = Math.max(200, Math.min(window.innerWidth - reserved, startWidth + delta));
                   setExplorerWidth(finalWidth);
                 };
                 const onUp = () => {
@@ -1285,7 +1304,13 @@ export default function App() {
                 let finalWidth = startWidth;
                 const onMove = (ev: MouseEvent) => {
                   const delta = startX - ev.clientX;
-                  finalWidth = Math.max(250, Math.min(window.innerWidth - 400, startWidth + delta));
+                  // Same reservation as the explorer handle, mirrored: the
+                  // terminal floor, the sidebar (if visible), and the
+                  // explorer panel + its handle (if open).
+                  const reserved = TERMINAL_MIN_WIDTH
+                    + (sidebarVisible ? sidebarWidth : 0)
+                    + (explorerOpen ? 4 + (activeWorkspace?.explorerWidth ?? explorerWidth) : 0);
+                  finalWidth = Math.max(250, Math.min(window.innerWidth - reserved, startWidth + delta));
                   setBrowserWidth(finalWidth);
                 };
                 const onUp = () => {

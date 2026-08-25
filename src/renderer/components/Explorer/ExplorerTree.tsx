@@ -36,6 +36,13 @@ export function ExplorerTree({
             ].filter(Boolean).join(' ')}
             style={{ paddingLeft: 8 + row.depth * 14 }}
             title={row.entry.name}
+            // A plain click on a div is not focusable by itself, but this
+            // guards against it becoming one later (or an ancestor doing so)
+            // — the store's focusedPaneId must stay on whatever terminal pane
+            // was last focused, not steal DOM focus into the tree via a
+            // click. preventDefault on mousedown does not cancel the
+            // subsequent click, so onSelect/onToggleDir below still fire.
+            onMouseDown={(e) => e.preventDefault()}
             onClick={(e) => {
               onSelect(row);
               if (isDir) onToggleDir(row.relPath);

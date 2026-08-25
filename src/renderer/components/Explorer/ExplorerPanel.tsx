@@ -56,19 +56,33 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
     if (!surfaceId || !root) return;
     const key = currentKeyRef.current;
     setLoading(true);
-    const result: ExplorerListResult =
-      await window.wmux.explorer.listDir(surfaceId, relPath, { showHidden });
-    if (currentKeyRef.current !== key) return; // stale — a different pane/root now
-    setLoading(false);
-    if ('error' in result) {
-      // Only a ROOT failure blanks the panel; a failure expanding one child
-      // leaves the rest of the tree on screen.
-      if (relPath === '') { setError(result.code); setTree({}); }
-      return;
+    try {
+      const result: ExplorerListResult =
+        await window.wmux.explorer.listDir(surfaceId, relPath, { showHidden });
+      // Clear loading for THIS call unconditionally, even if stale. A stale
+      // reply that skipped this would strand the spinner/empty-state forever
+      // if the newer fetch then bailed at the guard above (no surfaceId/root)
+      // and never started its own — nothing else would ever clear it.
+      setLoading(false);
+      if (currentKeyRef.current !== key) return; // stale — a different pane/root now
+      if ('error' in result) {
+        // Only a ROOT failure blanks the panel; a failure expanding one child
+        // leaves the rest of the tree on screen.
+        if (relPath === '') { setError(result.code); setTree({}); }
+        return;
+      }
+      setError(null);
+      if (relPath === '') setTruncated(result.truncated);
+      setTree((prev) => ({ ...prev, [result.relPath]: result.entries }));
+    } catch {
+      // ipcRenderer.invoke rejected — main threw rather than returning a
+      // structured ExplorerListError, so there is no `code` to branch on.
+      // Fall back to the generic read_failed message rather than leaving an
+      // unhandled rejection and a stuck spinner.
+      setLoading(false);
+      if (currentKeyRef.current !== key) return;
+      if (relPath === '') { setError('read_failed'); setTree({}); }
     }
-    setError(null);
-    if (relPath === '') setTruncated(result.truncated);
-    setTree((prev) => ({ ...prev, [result.relPath]: result.entries }));
   }, [surfaceId, root, showHidden]);
 
   // Re-root whenever the focused pane, its cwd, or the hidden filter changes.
