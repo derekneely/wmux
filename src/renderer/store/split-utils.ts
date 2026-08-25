@@ -261,9 +261,17 @@ export function freezeSurfaceCwds(tree: SplitNode): SplitNode {
  */
 export function dropEphemeralSurfaces(tree: SplitNode): SplitNode {
   if (tree.type === 'leaf') {
-    const surfaces = tree.surfaces
-      .filter((s) => !s.ephemeral || s.markdownDirty)
-      .map(({ ephemeral, ...rest }) => rest as SurfaceRef);
+    const kept = tree.surfaces.filter((s) => !s.ephemeral || s.markdownDirty);
+    // A leaf whose ONLY surface is a clean ephemeral one would otherwise come
+    // back with zero surfaces on restore (no instantiateLayout pass runs on
+    // load) — a state surface-slice.ts:489 says a live pane may never reach.
+    // Removing the leaf would silently reshape the user's saved layout across
+    // a restart; emitting it empty IS the broken state. So this one corner
+    // case promotes the last surface (clears `ephemeral`, keeps the tab)
+    // instead — the "ephemeral never persists" rule loses exactly this one
+    // case, which is the cheapest of the three prices. Do not "fix" this back.
+    const survivors = kept.length > 0 ? kept : tree.surfaces.slice(-1);
+    const surfaces = survivors.map(({ ephemeral, ...rest }) => rest as SurfaceRef);
     const activeSurfaceIndex = Math.max(0, Math.min(tree.activeSurfaceIndex, surfaces.length - 1));
     return { ...tree, surfaces, activeSurfaceIndex };
   }

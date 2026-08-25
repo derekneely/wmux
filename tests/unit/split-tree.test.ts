@@ -440,15 +440,35 @@ describe('dropEphemeralSurfaces', () => {
     expect(out.surfaces[0].markdownContent).toBe('edited');
   });
 
+  it('promotes a sole ephemeral surface instead of leaving an empty leaf', () => {
+    const out: any = dropEphemeralSurfaces(leaf([
+      { id: 'surf-1', type: 'markdown', ephemeral: true },
+    ]));
+    expect(out.surfaces).toHaveLength(1);
+    expect(out.surfaces[0].id).toBe('surf-1');
+    expect(out.surfaces[0].ephemeral).toBeFalsy();
+  });
+
+  it('still drops the ephemeral surface when a normal one remains', () => {
+    const out: any = dropEphemeralSurfaces(leaf([
+      { id: 'surf-1', type: 'terminal' },
+      { id: 'surf-2', type: 'markdown', ephemeral: true },
+    ]));
+    expect(out.surfaces.map((s: any) => s.id)).toEqual(['surf-1']);
+  });
+
   it('recurses into split nodes', () => {
     const out: any = dropEphemeralSurfaces({
       type: 'split', direction: 'horizontal', ratio: 0.5,
       children: [
-        leaf([{ id: 'a', type: 'markdown', ephemeral: true }]),
+        // Two surfaces here (not one) so this exercises the ordinary drop
+        // rather than the sole-ephemeral promotion case, which has its own
+        // dedicated tests above.
+        leaf([{ id: 'a', type: 'terminal' }, { id: 'a2', type: 'markdown', ephemeral: true }]),
         leaf([{ id: 'b', type: 'terminal' }]),
       ],
     } as any);
-    expect(out.children[0].surfaces).toHaveLength(0);
+    expect(out.children[0].surfaces).toHaveLength(1);
     expect(out.children[1].surfaces).toHaveLength(1);
   });
 });
