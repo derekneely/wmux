@@ -92,4 +92,47 @@ describe('openInPreviewTab', () => {
     await openInPreviewTab(ws, 'pane-does-not-exist' as any, 'C:\\repo\\a.md', 'a.md', { keep: false });
     expect(surfacesOf(ws).filter((s) => s.type === 'markdown')).toHaveLength(1);
   });
+
+  it('two rapid opens with no existing preview create exactly ONE ephemeral surface', async () => {
+    const { ws, pane } = setup();
+    // Neither await lands before the second call starts — this is the race:
+    // with no preview open yet, both calls could pass the "find a reusable
+    // preview" check before either has created one.
+    const p1 = openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const p2 = openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false });
+    await Promise.all([p1, p2]);
+
+    const md = surfacesOf(ws).filter((s) => s.type === 'markdown');
+    expect(md).toHaveLength(1);
+    // The later click wins the final label/content.
+    expect(md[0].markdownFilePath).toBe('C:\\repo\\b.md');
+  });
+
+  it('a slow first read does not overwrite a faster/newer second one', async () => {
+    const { ws, pane } = setup();
+    // Get a preview tab open first so both calls below hit the "reuse the
+    // existing preview" path, where the described race is a stale WRITE
+    // rather than a duplicate tab.
+    await openInPreviewTab(ws, pane, 'C:\\repo\\first.md', 'first.md', { keep: false });
+
+    let resolveA!: (value: { filePath: string; content: string; mtimeMs: number }) => void;
+    readFile.mockReset();
+    readFile.mockImplementation(async (filePath: string) => {
+      if (filePath === 'C:\\repo\\a.md') {
+        return new Promise((resolve) => { resolveA = resolve; });
+      }
+      return { filePath, content: `# ${filePath}`, mtimeMs: 1 };
+    });
+
+    const p1 = openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false }); // slow
+    const p2 = openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false }); // fast, clicked after
+    // Let the slow first read land only now — after both opens are in flight.
+    resolveA({ filePath: 'C:\\repo\\a.md', content: '# a', mtimeMs: 1 });
+    await Promise.all([p1, p2]);
+
+    const md = surfacesOf(ws).filter((s) => s.type === 'markdown');
+    expect(md).toHaveLength(1);
+    // The later-CLICKED file must win, regardless of which read landed first.
+    expect(md[0].markdownFilePath).toBe('C:\\repo\\b.md');
+  });
 });
