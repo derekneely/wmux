@@ -23,7 +23,7 @@ import type {
   ExplorerListError,
   ExplorerListResult,
 } from '../shared/types';
-import { ALLOWED_MD_EXT } from './markdown-file';
+import { isAllowedMarkdownPath } from './markdown-file';
 import { canonical } from './markdown-grants';
 
 /** Per-directory cap. Exceeding it sets `truncated` rather than shipping a
@@ -77,11 +77,13 @@ function mapErrno(err: any): ExplorerListError {
   if (code === 'ENOENT') return fail('Directory not found', 'not_found');
   if (code === 'ENOTDIR') return fail('Not a directory', 'not_a_directory');
   if (code === 'EACCES' || code === 'EPERM') return fail('Permission denied', 'denied');
-  return fail(err?.message || 'Failed to read directory', 'read_failed');
-}
-
-function isViewable(name: string): boolean {
-  return ALLOWED_MD_EXT.has(path.extname(name).toLowerCase());
+  // Node fs errors embed the full absolute path, which on Windows carries the
+  // user's account name — never put that on the wire to the renderer (the
+  // same reason wmux crash-report avoids the path-bearing Win32_Process
+  // properties). Log the real message main-side only; the renderer gets a
+  // fixed, English, path-free string.
+  console.error('[explorer-fs] read failed:', err?.message ?? err);
+  return fail('Failed to read directory', 'read_failed');
 }
 
 /** POSIX separators on the wire, so the renderer's rel-path keys are stable
@@ -109,8 +111,14 @@ export async function listDir(
   const abs = path.resolve(rootAbs, relPath);
   const rel = path.relative(rootAbs, abs);
 
-  // isAbsolute(rel) is the cross-drive case: path.relative returns an absolute
-  // path rather than a '..' chain when the two live on different drives.
+  // isAbsolute(rel) would be the cross-drive case: path.relative returns an
+  // absolute path rather than a '..' chain when the two live on different
+  // drives. In practice validateRelPath already rejects any drive-qualified
+  // relPath (^[A-Za-z]:) before this point, so a drive-qualified `abs` can
+  // never reach here and this clause is unreachable given the current
+  // policy. Kept anyway as deliberate defensive code — it is one line, and
+  // it is what stops this function from being cross-drive-unsafe should the
+  // policy layer above it ever change.
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     return fail('Path is outside the root', 'outside_root');
   }
@@ -182,7 +190,7 @@ export async function listDir(
       mtimeMs,
       // A link is never viewable: markdown.readFile refuses symlinks outright,
       // so offering one would be offering a click guaranteed to fail.
-      viewable: kind === 'file' && isViewable(dirent.name),
+      viewable: kind === 'file' && isAllowedMarkdownPath(dirent.name),
     });
   }
 

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listDir, validateRelPath, MAX_ENTRIES } from '../../src/main/explorer-fs';
+import { listDir, validateRelPath, MAX_ENTRIES, FILTERED_NAMES } from '../../src/main/explorer-fs';
 
 let root: string;
 let outside: string;
@@ -13,7 +13,9 @@ beforeAll(() => {
   outside = path.join(base, 'outside');
   fs.mkdirSync(path.join(root, 'docs', 'nested'), { recursive: true });
   fs.mkdirSync(path.join(root, '.git'), { recursive: true });
-  fs.mkdirSync(path.join(root, 'node_modules'), { recursive: true });
+  for (const filtered of FILTERED_NAMES) {
+    fs.mkdirSync(path.join(root, filtered), { recursive: true });
+  }
   fs.mkdirSync(outside, { recursive: true });
   fs.writeFileSync(path.join(root, 'README.md'), '# hi');
   fs.writeFileSync(path.join(root, 'index.ts'), 'export {}');
@@ -67,10 +69,17 @@ describe('validateRelPath', () => {
 
 describe('listDir jail', () => {
   it('lists the root', async () => {
+    // Subset assertion, not an exact array: other tests in this file create
+    // additional entries under `root` (leaf-link, mid-link, big,
+    // denied-probe), and this test must stay correct regardless of run
+    // order, `.only`, or file-level concurrency — it does not own `root`
+    // exclusively.
     const r: any = await listDir(root, '');
     expect(r.code).toBeUndefined();
     expect(r.relPath).toBe('');
-    expect(r.entries.map((e: any) => e.name).sort()).toEqual(['README.md', 'docs', 'index.ts']);
+    const names = r.entries.map((e: any) => e.name);
+    expect(names).toEqual(expect.arrayContaining(['README.md', 'docs', 'index.ts']));
+    expect(names).not.toContain('.git');
   });
 
   it('rejects a .. escape, including a deep chain', async () => {
@@ -83,9 +92,14 @@ describe('listDir jail', () => {
     expect(err(await listDir(root, outside))).toBe('invalid_path');
   });
 
-  it('rejects a cross-drive target via the isAbsolute(rel) clause', async () => {
-    // path.relative() returns an ABSOLUTE path across drives rather than a
-    // '..' chain, which is the case the startsWith('..') check alone misses.
+  it('rejects a drive-qualified relPath via the path policy', async () => {
+    // A drive-qualified relPath like 'D:\data' is caught by
+    // validateRelPath's /^[A-Za-z]:/ check BEFORE listDir ever resolves a
+    // path, so this test proves rejection at the policy layer. It does NOT
+    // exercise listDir's `path.isAbsolute(rel)` clause — that clause is
+    // unreachable given the current policy (a drive-qualified relPath never
+    // survives validateRelPath), and is covered by its own comment in
+    // explorer-fs.ts rather than by a test that can't reach it.
     const otherDrive = root.startsWith('C:') ? 'D:\\data' : 'C:\\data';
     expect(err(await listDir(root, otherDrive))).toBe('invalid_path');
   });
@@ -105,14 +119,20 @@ describe('listDir jail', () => {
   });
 
   it('reports a junction entry as kind=symlink and never viewable', async () => {
+    // Self-contained: creates its own link rather than relying on
+    // 'leaf-link' from the earlier test having already run, so this
+    // assertion holds regardless of test order, `.only`, or concurrency.
+    fs.symlinkSync(outside, path.join(root, 'kind-check-link'), 'junction');
     const r: any = await listDir(root, '');
-    const link = r.entries.find((e: any) => e.name === 'leaf-link');
+    const link = r.entries.find((e: any) => e.name === 'kind-check-link');
     expect(link.kind).toBe('symlink');
     expect(link.viewable).toBe(false);
   });
 
-  it('treats Windows case variance as the same jail', async () => {
-    if (process.platform !== 'win32') return;
+  // skipIf rather than an early `return` inside the test body: a silent
+  // no-op reports green with zero assertions run, which looks identical to
+  // a passing test in CI output. skipIf shows up as explicitly skipped.
+  it.skipIf(process.platform !== 'win32')('treats Windows case variance as the same jail', async () => {
     const shouted = root.toUpperCase();
     const r: any = await listDir(shouted, 'docs');
     expect(r.code).toBeUndefined();
@@ -121,20 +141,26 @@ describe('listDir jail', () => {
 });
 
 describe('listDir filtering, limits and errors', () => {
-  it('hides dotfiles, .git, node_modules, dist and build by default', async () => {
+  it('hides dotfiles and every FILTERED_NAMES entry by default', async () => {
+    // Asserts against the actual exported set (.git, node_modules, dist,
+    // build as of writing) rather than a hardcoded list that can silently
+    // drift from FILTERED_NAMES.
+    expect(FILTERED_NAMES.size).toBeGreaterThan(0);
     const r: any = await listDir(root, '');
     const names = r.entries.map((e: any) => e.name);
-    expect(names).not.toContain('.git');
     expect(names).not.toContain('.env');
-    expect(names).not.toContain('node_modules');
+    for (const filtered of FILTERED_NAMES) {
+      expect(names).not.toContain(filtered);
+    }
   });
 
-  it('shows them with showHidden', async () => {
+  it('shows dotfiles and FILTERED_NAMES entries with showHidden', async () => {
     const r: any = await listDir(root, '', { showHidden: true });
     const names = r.entries.map((e: any) => e.name);
-    expect(names).toContain('.git');
     expect(names).toContain('.env');
-    expect(names).toContain('node_modules');
+    for (const filtered of FILTERED_NAMES) {
+      expect(names).toContain(filtered);
+    }
   });
 
   it('marks viewable from ALLOWED_MD_EXT', async () => {
