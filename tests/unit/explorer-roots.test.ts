@@ -56,4 +56,40 @@ describe('explorer roots', () => {
     forgetExplorerRoot('surf-4');
     expect(getExplorerRoot('surf-4')).toBeNull();
   });
+
+  it('deletes an EXISTING root when a later report is empty or whitespace', () => {
+    reportExplorerCwd('surf-5', real);
+    expect(getExplorerRoot('surf-5')).not.toBeNull();
+    reportExplorerCwd('surf-5', '   ');
+    expect(getExplorerRoot('surf-5')).toBeNull();
+  });
+
+  it('re-realpaths and replaces realRoot when the reported cwd changes', () => {
+    const other = path.join(base, 'other-project');
+    fs.mkdirSync(other, { recursive: true });
+    reportExplorerCwd('surf-6', real);
+    const first = getExplorerRoot('surf-6')!;
+    expect(first.realRoot).toBe(fs.realpathSync.native(real));
+
+    reportExplorerCwd('surf-6', other);
+    const second = getExplorerRoot('surf-6')!;
+    expect(second.cwd).toBe(other);
+    expect(second.realRoot).toBe(fs.realpathSync.native(other));
+    expect(second.realRoot).not.toBe(first.realRoot);
+  });
+
+  it('normalizes a Git Bash cwd (/c/...) to the equivalent Windows path', () => {
+    const driveLetter = path.parse(real).root.charAt(0).toLowerCase();
+    const rest = real.slice(3).replace(/\\/g, '/');
+    const gitBashCwd = `/${driveLetter}/${rest}`;
+    reportExplorerCwd('surf-gitbash', gitBashCwd);
+    const root = getExplorerRoot('surf-gitbash');
+    expect(root).not.toBeNull();
+    expect(root!.realRoot).toBe(fs.realpathSync.native(real));
+  });
+
+  it('does not root a WSL cwd (/mnt/c/...) — left deliberately unresolved', () => {
+    reportExplorerCwd('surf-wsl', '/mnt/c/Users/someone/project');
+    expect(getExplorerRoot('surf-wsl')).toBeNull();
+  });
 });

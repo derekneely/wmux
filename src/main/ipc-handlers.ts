@@ -678,6 +678,16 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       // would show whatever coincidentally exists at that path on Windows.
       // detect() and not refresh(): refresh() runs a Win32_Process sweep, and
       // this handler is on the pane-switch path.
+      //
+      // detect() returns null (i.e. "local") in two states where the pane is
+      // actually remote or ambiguous: the nested-ssh disagreement between a
+      // managed and a reported destination, and probe-only evidence with no
+      // authoritative source. Neither is exploitable today ONLY because no
+      // remote shell runs wmux's report_pwd integration, so no remote cwd ever
+      // reaches explorer-roots' map in the first place — that is a property of
+      // today's report_pwd sources, not of this gate. If a future cwd source
+      // ever feeds a remote path in here, this check would need to widen past
+      // detect()'s null to catch that too.
       if (sshDetector.detect(surfaceId)) {
         return { error: 'This pane is inside an SSH session', code: 'remote' };
       }

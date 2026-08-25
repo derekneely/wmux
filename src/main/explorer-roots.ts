@@ -11,6 +11,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { trustedWindowsCwd } from './ssh-detect';
 
 export interface ExplorerRoot {
   /** Exactly what the shell reported, for display. */
@@ -37,14 +38,25 @@ export function reportExplorerCwd(surfaceId: string, cwd: string): void {
   const existing = roots.get(surfaceId);
   if (existing && existing.cwd === trimmed) return;
 
+  // Route through the same normalization ssh-detect.ts uses for report_pwd:
+  // Git Bash reports /c/foo, which is not a path realpath.native can resolve
+  // as-is — falling back to path.resolve on the raw string would coincidentally
+  // land on a wrong-but-real Windows directory (e.g. /tmp -> C:\tmp). WSL's
+  // /mnt/c/foo is deliberately left unresolved rather than guessed at.
+  const windowsCwd = trustedWindowsCwd(trimmed);
+  if (!windowsCwd) {
+    roots.delete(surfaceId);
+    return;
+  }
+
   let realRoot: string;
   try {
-    realRoot = fs.realpathSync.native(trimmed);
+    realRoot = fs.realpathSync.native(windowsCwd);
   } catch {
-    // The directory may not exist locally at all — a WSL or remote path, or one
+    // The directory may not exist locally at all — a remote path, or one
     // deleted under the shell. Store the resolved form anyway; listDir returns
     // not_found, which is the honest answer.
-    realRoot = path.resolve(trimmed);
+    realRoot = path.resolve(windowsCwd);
   }
   roots.set(surfaceId, { cwd: trimmed, realRoot });
 }
