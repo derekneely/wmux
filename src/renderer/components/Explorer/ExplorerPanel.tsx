@@ -8,6 +8,7 @@ import {
   type ExplorerRow, type ExplorerTreeState,
 } from './explorer-state';
 import { ExplorerTree } from './ExplorerTree';
+import { openInPreviewTab } from './open-preview';
 import '../../styles/explorer.css';
 import type { PaneId } from '../../../shared/types';
 
@@ -103,9 +104,44 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
 
   const rows = useMemo(() => flattenVisible(tree, expanded), [tree, expanded]);
 
-  const handleActivate = useCallback((_row: ExplorerRow, _opts: { keep: boolean }) => {
-    // Task 7 wires the preview-tab open flow here.
+  // The tree's relPath is POSIX; the backing path the markdown surface saves
+  // and reveals with must be a real Windows path.
+  const toAbsolutePath = useCallback((relPath: string) => (
+    `${root.replace(/[\\/]+$/, '')}\\${relPath.replace(/\//g, '\\')}`
+  ), [root]);
+
+  const handleActivate = useCallback((row: ExplorerRow, opts: { keep: boolean }) => {
+    if (!activeWorkspaceId || !focusedPaneId || !root) return;
+    const absolute = toAbsolutePath(row.relPath);
+    void openInPreviewTab(activeWorkspaceId, focusedPaneId, absolute, row.entry.name, opts);
+  }, [activeWorkspaceId, focusedPaneId, root, toAbsolutePath]);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: ExplorerRow } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+
+  const handleContextMenu = useCallback((row: ExplorerRow, event: React.MouseEvent) => {
+    setContextMenu({ x: event.clientX, y: event.clientY, row });
   }, []);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') closeContextMenu(); };
+    const handleMouseDown = (e: MouseEvent) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) closeContextMenu();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handleMouseDown);
+    };
+  }, [contextMenu, closeContextMenu]);
+
+  const copyPath = useCallback((relPath: string) => {
+    void window.wmux?.clipboard?.writeText?.(toAbsolutePath(relPath));
+  }, [toAbsolutePath]);
 
   const rootLabel = root ? (root.split(/[\\/]/).filter(Boolean).pop() ?? root) : '';
 
@@ -147,7 +183,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
             onToggleDir={handleToggleDir}
             onSelect={(row) => setSelected(row.relPath)}
             onActivate={handleActivate}
-            onContextMenu={() => { /* Task 7 */ }}
+            onContextMenu={handleContextMenu}
           />
         )}
         {truncated && (
@@ -156,6 +192,51 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
           </div>
         )}
       </div>
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className="ctx-menu"
+          role="menu"
+          style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y }}
+        >
+          <div
+            className="ctx-menu__item"
+            role="menuitem"
+            onClick={() => { copyPath(contextMenu.row.relPath); closeContextMenu(); }}
+          >
+            {t('explorer.copyPath', 'Copy path')}
+          </div>
+          <div
+            className={`ctx-menu__item${contextMenu.row.entry.viewable ? '' : ' ctx-menu__item--disabled'}`}
+            role="menuitem"
+            aria-disabled={!contextMenu.row.entry.viewable}
+            onClick={() => {
+              if (!contextMenu.row.entry.viewable) return;
+              void window.wmux.markdown.reveal(toAbsolutePath(contextMenu.row.relPath));
+              closeContextMenu();
+            }}
+          >
+            {t('explorer.reveal', 'Reveal in File Explorer')}
+          </div>
+          <div
+            className={`ctx-menu__item${contextMenu.row.entry.viewable ? '' : ' ctx-menu__item--disabled'}`}
+            role="menuitem"
+            aria-disabled={!contextMenu.row.entry.viewable}
+            onClick={() => {
+              if (!contextMenu.row.entry.viewable) return;
+              void window.wmux.markdown.openInApp(toAbsolutePath(contextMenu.row.relPath));
+              closeContextMenu();
+            }}
+          >
+            {t('explorer.openInApp', 'Open in default app')}
+          </div>
+          {!contextMenu.row.entry.viewable && (
+            <div className="explorer-panel__ctx-hint">
+              {t('explorer.notViewable', 'wmux can only open markdown and text files')}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

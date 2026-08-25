@@ -368,6 +368,8 @@ export const en = {
   'explorer.truncated': 'Showing the first {count} entries',
   'explorer.notViewable': 'wmux can only open markdown and text files',
   'explorer.copyPath': 'Copy path',
+  'explorer.reveal': 'Reveal in File Explorer',
+  'explorer.openInApp': 'Open in default app',
   'explorer.error.no_root': 'This pane has not reported a working directory yet',
   'explorer.error.remote': 'This pane is inside an SSH session',
   'explorer.error.invalid_path': 'That path is not allowed',

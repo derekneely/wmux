@@ -107,3 +107,20 @@
 .explorer-resize-handle {
   background: transparent;
 }
+
+/* Explorer's own context menu reuses the sidebar's .ctx-menu chrome (see
+   sidebar.css) — only the disabled state and the not-viewable hint are
+   specific to this panel. */
+.ctx-menu__item--disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+.explorer-panel__ctx-hint {
+  padding: 6px 12px 4px;
+  max-width: 220px;
+  font-size: 11px;
+  color: rgba(var(--ui-overlay-rgb),0.5);
+  white-space: normal;
+}

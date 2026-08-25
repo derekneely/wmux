@@ -388,7 +388,9 @@ export default function SurfaceTabBar({
                   placeholder={getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t)}
                 />
               ) : (
-                <span className="surface-tab__label">{getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t)}</span>
+                <span className={`surface-tab__label${surface.ephemeral ? ' surface-tab__label--ephemeral' : ''}`}>
+                  {getSurfaceLabel(surface, agentMeta?.label, workspaceShell, t)}
+                </span>
               )}
               {surfaces.length > 1 && !isRenaming && (
                 <button

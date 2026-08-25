@@ -333,6 +333,8 @@ export const fr: Translation = {
   'explorer.truncated': 'Affichage des {count} premières entrées',
   'explorer.notViewable': 'wmux ne peut ouvrir que des fichiers markdown et texte',
   'explorer.copyPath': 'Copier le chemin',
+  'explorer.reveal': "Révéler dans l'explorateur de fichiers",
+  'explorer.openInApp': "Ouvrir dans l'application par défaut",
   'explorer.error.no_root': "Ce volet n'a pas encore signalé de répertoire de travail",
   'explorer.error.remote': 'Ce volet est dans une session SSH',
   'explorer.error.invalid_path': "Ce chemin n'est pas autorisé",

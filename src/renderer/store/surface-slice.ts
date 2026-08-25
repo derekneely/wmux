@@ -75,6 +75,8 @@ export interface SurfaceSlice {
        * dismissal rather than retract it — see `isDiffTabDismissed`.
        */
       auto?: boolean;
+      /** An explorer preview tab (see SurfaceRef.ephemeral). */
+      ephemeral?: boolean;
     },
   ) => SurfaceId | null;
 
@@ -241,6 +243,10 @@ export function markdownContentPatch(
   } else {
     patch.markdownDirty = !opts.filePath && !!existing.markdownFilePath;
   }
+  // Editing promotes: a surface the user (or an agent via markdown.set_content)
+  // has changed is no longer disposable, so a click in the tree must not
+  // recycle it. Only a load FROM A FILE leaves it disposable.
+  if (patch.markdownDirty && !opts.filePath) patch.ephemeral = undefined;
   return patch;
 }
 
@@ -287,6 +293,9 @@ function pushClosedSurface(workspaceId: WorkspaceId, surface: SurfaceRef): void 
     diffTabDismissed.add(workspaceId);
     return;
   }
+  // A preview tab is disposable by definition — Ctrl+Shift+T should bring
+  // back the tab the user meant to keep, not the last thing they glanced at.
+  if (surface.ephemeral) return;
   closedSurfaceStack.push({
     type: surface.type,
     colorScheme: surface.colorScheme,
@@ -336,6 +345,7 @@ export const createSurfaceSlice: StateCreator<SliceState, [], [], SurfaceSlice> 
       ...(options?.cwd ? { cwd: options.cwd } : {}),
       ...(options?.startupCommands?.length ? { startupCommands: options.startupCommands } : {}),
       ...(options?.url ? { url: options.url } : {}),
+      ...(options?.ephemeral ? { ephemeral: true } : {}),
     };
     const newSurfaces = [...leaf.surfaces, newSurface];
     const newActiveSurfaceIndex = newSurfaces.length - 1;
