@@ -73,7 +73,54 @@ export interface SurfaceRef {
    *  confirmed before closing. Persisted with the content, so an unsaved edit
    *  survives a restart — and comes back still marked unsaved. */
   markdownDirty?: boolean;
+  /**
+   * An explorer preview tab: the next single-click replaces it in place rather
+   * than opening another tab. Cleared when the user promotes it (double-click,
+   * Ctrl+click, or an edit). Never persisted — see the session mappers.
+   */
+  ephemeral?: boolean;
 }
+
+// ─── File explorer (docs/local/specs/2026-08-25-file-explorer-design.md) ─────
+// Directory ENUMERATION is the new capability here; reads still go through
+// markdown.readFile, which is unjailed by deliberate existing design. The
+// renderer supplies no filesystem path at any point — only a surfaceId and a
+// relative path, both of which main validates.
+
+export interface ExplorerEntry {
+  name: string;
+  kind: 'dir' | 'file' | 'symlink';
+  size: number;
+  mtimeMs: number;
+  /** Whether the markdown surface will read it — ALLOWED_MD_EXT.has(ext). */
+  viewable: boolean;
+}
+
+export interface ExplorerListOk {
+  /** Absolute root main resolved for this surface — display only. */
+  root: string;
+  /** The listed directory relative to `root`, POSIX separators, '' for the root. */
+  relPath: string;
+  entries: ExplorerEntry[];
+  /** Directory exceeded MAX_ENTRIES; `entries` is a prefix. */
+  truncated: boolean;
+}
+
+export type ExplorerErrorCode =
+  | 'no_root'         // surface has reported no cwd yet
+  | 'remote'          // surface is inside ssh; its cwd is not a local path
+  | 'invalid_path'    // relPath failed the Windows path policy
+  | 'outside_root'    // escaped the jail
+  | 'not_found'
+  | 'not_a_directory'
+  | 'denied'          // EACCES/EPERM
+  | 'read_failed';
+
+/** `error` stays English for main-process callers; `code` is what the renderer
+ *  maps to a translation key. Same split as MarkdownReadError (commit 82a779f). */
+export interface ExplorerListError { error: string; code: ExplorerErrorCode }
+
+export type ExplorerListResult = ExplorerListOk | ExplorerListError;
 
 /**
  * A user-saved pane layout: geometry plus whatever each pane's surface was
@@ -157,6 +204,10 @@ export interface WorkspaceInfo {
   statusOverride?: 'running' | 'idle';
   browserUrl?: string;
   browserWidth?: number;
+  explorerOpen?: boolean;
+  explorerWidth?: number;
+  /** Expanded dirs by root path, POSIX separators. Capped at 8 roots, LRU. */
+  explorerExpanded?: Record<string, string[]>;
 }
 
 // Surface
@@ -291,6 +342,11 @@ export interface SavedSession {
     // Both written since 0.4x; declared here as of #145, which was caused by a
     // save path quietly dropping fields the type never mentioned.
     browserWidth?: number;
+    // Declared here for the same reason browserWidth is: #145 was a save path
+    // quietly dropping fields the type never mentioned.
+    explorerOpen?: boolean;
+    explorerWidth?: number;
+    explorerExpanded?: Record<string, string[]>;
     pinned?: boolean;
   }>;
   sidebarWidth: number;
@@ -462,6 +518,8 @@ export const IPC_CHANNELS = {
   MARKDOWN_SAVE_FILE: 'markdown:save-file',
   MARKDOWN_SAVE_AS: 'markdown:save-as',
   MARKDOWN_STAT_FILE: 'markdown:stat-file',
+  // File explorer: directory enumeration, jailed to the surface's root in main.
+  EXPLORER_LIST_DIR: 'explorer:list-dir',
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
