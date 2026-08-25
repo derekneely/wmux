@@ -91,6 +91,14 @@
 .explorer-row--dimmed { opacity: 0.45; }
 .explorer-row--link   { font-style: italic; }
 
+/* Keyboard focus (roving tabIndex) is a different state from selection —
+   selection is a background fill, focus is an inset outline so both can be
+   visible on the same row at once (e.g. Home/End landing on the selected row). */
+.explorer-row--focused {
+  outline: 1px solid var(--ui-accent, rgba(var(--ui-overlay-rgb),0.6));
+  outline-offset: -1px;
+}
+
 .explorer-row__chevron {
   width: 12px;
   flex-shrink: 0;
