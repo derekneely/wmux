@@ -135,6 +135,7 @@ export const zh: Translation = {
   'surfaceLabel.browser': '浏览器',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': '差异',
+  'surfaceLabel.code': '代码',
   'surfaceLabel.tab': '标签',
   // SplitPane — 拖拽分屏预览
   'splitPreview.dropHere': '拖放到此处',

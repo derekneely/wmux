@@ -9,7 +9,7 @@ export type SplitNode =
   | { type: 'leaf'; paneId: PaneId; surfaces: SurfaceRef[]; activeSurfaceIndex: number }
   | { type: 'branch'; direction: 'horizontal' | 'vertical'; ratio: number; children: [SplitNode, SplitNode] };
 
-export type SurfaceType = 'terminal' | 'browser' | 'markdown' | 'diff';
+export type SurfaceType = 'terminal' | 'browser' | 'markdown' | 'diff' | 'code';
 
 /**
  * Which engine backs a `browser` surface.
@@ -92,6 +92,39 @@ export interface SurfaceRef {
    *  confirmed before closing. Persisted with the content, so an unsaved edit
    *  survives a restart — and comes back still marked unsaved. */
   markdownDirty?: boolean;
+
+  // ─── Code viewer surface (docs/local/specs/2026-08-26-code-viewer-design.md)
+  // A read-only text view of a file the explorer opened. Deliberately its OWN
+  // type rather than a flag on `markdown`: a .rs file in a surface labelled
+  // markdown lies to `wmux markdown get`, to the tab icon, and to session
+  // restore. Read-only is structural — CodePane has no editor — not a flag
+  // every future feature has to remember to check.
+
+  /** Absolute path of the file. ALWAYS set: a code surface is never pathless,
+   *  which is the difference from `markdownFilePath` that lets the buffer go
+   *  unpersisted. */
+  codeFilePath?: string;
+  /** Basename, used as the tab label. */
+  codeFileName?: string;
+  /** Path relative to the surface's explorer root. Carried because a reload
+   *  goes back through `code.read-file`, which takes a relPath — rebuilding one
+   *  would mean re-deriving the root in the renderer, which is exactly what the
+   *  jail exists to prevent. */
+  codeRelPath?: string;
+  /** mtime at the last successful read, so a reload can notice a rewrite. */
+  codeFileMtime?: number;
+  /**
+   * The file's text. In-store only — STRIPPED by dropCodeContent before any
+   * persistence, unlike markdownContent which is deliberately persisted.
+   *
+   * Two reasons, both concrete. dropEphemeralSurfaces promotes a leaf's only
+   * clean ephemeral surface rather than dropping it, so a code preview tab
+   * genuinely can reach session.json and a saved layout. And instantiateLayout
+   * spreads every surface field through, so a persisted buffer would be reborn
+   * as a stale ghost of a file in every workspace made from that layout — the
+   * same failure workspace-slice.ts:276 describes for `ephemeral`.
+   */
+  codeContent?: string;
   /**
    * An explorer preview tab: the next single-click replaces it in place rather
    * than opening another tab. Cleared when the user promotes it (double-click,

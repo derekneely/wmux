@@ -138,6 +138,7 @@ export const sv: Translation = {
   'surfaceLabel.browser': 'Webbläsare',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Flik',
   // SplitPane — förhandsgranskning vid dra-och-dela
   'splitPreview.dropHere': 'Släpp här',

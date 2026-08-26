@@ -149,6 +149,7 @@ export const tr: Translation = {
   'surfaceLabel.browser': 'Tarayıcı',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Sekme',
   // SplitPane — bölme önizleme katmanı
   'splitPreview.dropHere': 'Buraya bırakın',

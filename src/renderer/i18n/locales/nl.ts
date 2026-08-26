@@ -138,6 +138,7 @@ export const nl: Translation = {
   'surfaceLabel.browser': 'Browser',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Tabblad',
   // SplitPane — voorbeeldoverlay bij slepen om te splitsen
   'splitPreview.dropHere': 'Hier neerzetten',

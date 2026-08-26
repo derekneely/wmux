@@ -52,6 +52,7 @@ function surfaceIcon(type: string, isAgent: boolean): string {
     case 'browser': return '◎';
     case 'markdown': return '¶';
     case 'diff': return '±';
+    case 'code': return '{}';
     default: return '○';
   }
 }

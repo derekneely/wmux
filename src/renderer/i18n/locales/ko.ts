@@ -154,6 +154,7 @@ export const ko: Translation = {
   'surfaceLabel.browser': '브라우저',
   'surfaceLabel.markdown': '마크다운',
   'surfaceLabel.diff': '변경 사항',
+  'surfaceLabel.code': '코드',
   'surfaceLabel.tab': '탭',
   // SplitPane — 끌어서 분할할 때의 미리 보기
   'splitPreview.dropHere': '여기에 놓기',

@@ -172,6 +172,7 @@ export const en = {
   'surfaceLabel.browser': 'Browser',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Tab',
   // SplitPane — drag-to-split preview overlay
   'splitPreview.dropHere': 'Drop here',

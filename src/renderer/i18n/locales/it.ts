@@ -138,6 +138,7 @@ export const it: Translation = {
   'surfaceLabel.browser': 'Browser',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Scheda',
   // SplitPane — anteprima di divisione trascina-e-rilascia
   'splitPreview.dropHere': 'Rilascia qui',

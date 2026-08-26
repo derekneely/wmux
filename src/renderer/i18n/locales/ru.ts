@@ -149,6 +149,7 @@ export const ru: Translation = {
   'surfaceLabel.browser': 'Браузер',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Код',
   'surfaceLabel.tab': 'Вкладка',
   // SplitPane — оверлей предпросмотра разделения
   'splitPreview.dropHere': 'Перетащите сюда',

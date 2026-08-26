@@ -2,7 +2,7 @@ import { StateCreator } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { WorkspaceId, WorkspaceInfo, SplitNode, SavedLayout } from '../../shared/types';
 import { isPosixPath } from '../../shared/paths';
-import { createLeaf, instantiateLayout, freezeSurfaceCwds, dropEphemeralSurfaces, mergeStartupCommands } from './split-utils';
+import { createLeaf, instantiateLayout, freezeSurfaceCwds, dropEphemeralSurfaces, dropCodeContent, mergeStartupCommands } from './split-utils';
 import { killTreeTerminalPtys } from './pty-teardown';
 import type { TranslationKey } from '../i18n/core';
 
@@ -274,7 +274,7 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice> = (set, get) => 
       // previewed file and all — in every workspace made from this layout,
       // forever. That is worse than leaking one into a session, which is why
       // SurfaceRef.ephemeral says "never persisted" without qualification.
-      splitTree: dropEphemeralSurfaces(freezeSurfaceCwds(active.splitTree)),
+      splitTree: dropCodeContent(dropEphemeralSurfaces(freezeSurfaceCwds(active.splitTree))),
       createdAt: Date.now(),
     };
     settings.setSavedLayouts([...(settings.savedLayouts ?? []), layout]);
@@ -293,7 +293,7 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice> = (set, get) => 
     // Same pair as saveCurrentLayoutAsPreset above — see the note there for why
     // an ephemeral surface must never reach a saved layout.
     const frozen = mergeStartupCommands(
-      dropEphemeralSurfaces(freezeSurfaceCwds(active.splitTree)),
+      dropCodeContent(dropEphemeralSurfaces(freezeSurfaceCwds(active.splitTree))),
       existing.splitTree,
     );
     settings.setSavedLayouts(settings.savedLayouts!.map((l) => (l.id === id ? { ...l, splitTree: frozen } : l)));

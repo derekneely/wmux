@@ -281,6 +281,35 @@ export function dropEphemeralSurfaces(tree: SplitNode): SplitNode {
   };
 }
 
+/**
+ * Strip the code viewer's in-memory buffer on the way to disk.
+ *
+ * Its own function rather than a line inside dropEphemeralSurfaces: that one's
+ * name promises exactly one thing, and hiding a second responsibility under it
+ * is how the next reader ends up not knowing this happens. Composed at the same
+ * four call sites, always outermost.
+ *
+ * The path fields survive — they are what CodePane re-reads from on mount, and
+ * dropping them would turn a restored tab into a blank surface with no way back
+ * to its file.
+ */
+export function dropCodeContent(tree: SplitNode): SplitNode {
+  if (tree.type === 'leaf') {
+    return {
+      ...tree,
+      surfaces: tree.surfaces.map((s) => {
+        if (s.type !== 'code' || s.codeContent === undefined) return s;
+        const { codeContent, ...rest } = s;
+        return rest as SurfaceRef;
+      }),
+    };
+  }
+  return {
+    ...tree,
+    children: [dropCodeContent(tree.children[0]), dropCodeContent(tree.children[1])],
+  };
+}
+
 // ─── patchLeafPrimarySurface (saved-layout pane editing) ─────────────────────
 // This lets the Saved Layouts settings UI set `startupCommands`/ `shell` 
 // directly on a stored template's pane, same fields Quick Launch

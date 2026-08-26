@@ -149,6 +149,7 @@ export const ja: Translation = {
   'surfaceLabel.browser': 'ブラウザー',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'コード',
   'surfaceLabel.tab': 'タブ',
   // SplitPane — ドラッグ分割のプレビューオーバーレイ
   'splitPreview.dropHere': 'ここにドロップ',

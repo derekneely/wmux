@@ -149,6 +149,7 @@ export const hi: Translation = {
   'surfaceLabel.browser': 'ब्राउज़र',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'कोड',
   'surfaceLabel.tab': 'टैब',
   // SplitPane — विभाजित करने के लिए खींचने वाला पूर्वावलोकन ओवरले
   'splitPreview.dropHere': 'यहाँ छोड़ें',

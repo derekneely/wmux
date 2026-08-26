@@ -138,6 +138,7 @@ export const fr: Translation = {
   'surfaceLabel.browser': 'Navigateur',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Onglet',
   // SplitPane — aperçu de division par glisser-déposer
   'splitPreview.dropHere': 'Déposer ici',

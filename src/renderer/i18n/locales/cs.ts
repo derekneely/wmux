@@ -149,6 +149,7 @@ export const cs: Translation = {
   'surfaceLabel.browser': 'Prohlížeč',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': 'Diff',
+  'surfaceLabel.code': 'Code',
   'surfaceLabel.tab': 'Karta',
   // SplitPane — překryvná vrstva náhledu při přetahování s rozdělením
   'splitPreview.dropHere': 'Sem přetáhněte',

@@ -151,6 +151,7 @@ export const zhTW: Translation = {
   'surfaceLabel.browser': '瀏覽器',
   'surfaceLabel.markdown': 'Markdown',
   'surfaceLabel.diff': '差異',
+  'surfaceLabel.code': '程式碼',
   'surfaceLabel.tab': '分頁',
   // SplitPane — 拖曳分割的預覽覆蓋層
   'splitPreview.dropHere': '拖放到這裡',
