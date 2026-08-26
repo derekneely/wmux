@@ -187,14 +187,23 @@ describe('listDir filtering, limits and errors', () => {
     }
   });
 
-  it('marks viewable from ALLOWED_MD_EXT', async () => {
-    const r: any = await listDir(root, '');
-    const byName = Object.fromEntries(r.entries.map((e: any) => [e.name, e]));
+  it('marks every non-binary file viewable, and never a directory', async () => {
+    const result: any = await listDir(root, '', { showHidden: true });
+    const byName = Object.fromEntries(result.entries.map((e: any) => [e.name, e]));
     expect(byName['README.md'].viewable).toBe(true);
-    expect(byName['index.ts'].viewable).toBe(false);
+    // The change this feature exists for: source files are now openable.
+    expect(byName['index.ts'].viewable).toBe(true);
+    expect(byName['.env'].viewable).toBe(true);
     expect(byName['docs'].viewable).toBe(false);
     const docs: any = await listDir(root, 'docs');
     expect(docs.entries.find((e: any) => e.name === 'guide.markdown').viewable).toBe(true);
+  });
+
+  it('never marks a binary file viewable', async () => {
+    fs.writeFileSync(path.join(root, 'logo.png'), 'x');
+    const result: any = await listDir(root, '');
+    const logo = result.entries.find((e: any) => e.name === 'logo.png');
+    expect(logo.viewable).toBe(false);
   });
 
   // Explicit timeout: this writes 2005 files and then lstats every one of them,

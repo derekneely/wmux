@@ -188,3 +188,42 @@ describe('ExplorerPanel wiring', () => {
     expect(src).toContain('expandedByRoot[absRoot]');
   });
 });
+
+// ─── Wiring pin: the code viewer ─────────────────────────────────────────────
+// Same tactic, same reason as the block above — a click that routes to the
+// wrong surface type, or a MARKDOWN_EXT list that has drifted from main's
+// ALLOWED_MD_EXT, fails silently at runtime.
+describe('code viewer wiring', () => {
+  it('open-preview routes non-markdown files to a code surface', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../src/renderer/components/Explorer/open-preview.ts'), 'utf-8',
+    );
+    expect(src).toContain('targetTypeFor');
+    expect(src).toContain('window.wmux.code.readFile');
+  });
+
+  it('the renderer MARKDOWN_EXT list matches main ALLOWED_MD_EXT exactly', () => {
+    // Two lists that must agree across a boundary the renderer may not import
+    // across. Drift here silently sends .md files to the code viewer.
+    const renderer = readFileSync(
+      resolve(__dirname, '../../src/renderer/components/Explorer/open-preview.ts'), 'utf-8',
+    );
+    const main = readFileSync(resolve(__dirname, '../../src/main/markdown-file.ts'), 'utf-8');
+    const exts = (s: string, marker: string): string[] => {
+      const at = s.indexOf(marker);
+      expect(at).toBeGreaterThanOrEqual(0);
+      const body = s.slice(at, s.indexOf(']', at));
+      return [...body.matchAll(/'(\.[a-z]+)'/g)].map((m) => m[1]).sort();
+    };
+    const rendererExts = exts(renderer, 'MARKDOWN_EXT = new Set');
+    expect(rendererExts.length).toBeGreaterThan(0);
+    expect(rendererExts).toEqual(exts(main, 'ALLOWED_MD_EXT = new Set'));
+  });
+
+  it('the panel passes surfaceId and relPath to openInPreviewTab', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../src/renderer/components/Explorer/ExplorerPanel.tsx'), 'utf-8',
+    );
+    expect(src).toContain('relPath: row.relPath');
+  });
+});

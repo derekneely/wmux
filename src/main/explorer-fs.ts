@@ -4,10 +4,15 @@
 // arrives from explorer-roots.ts, which has already resolved it through
 // fs.realpath.native, and IS trusted.
 //
-// Reads are deliberately NOT governed here. markdown.readFile accepts any
-// absolute path and is gated only on the extension whitelist, by existing
-// design — the explorer widens nothing, and adding a second read guard is the
-// duplication markdown-file.ts was extracted to prevent.
+// MARKDOWN reads are deliberately NOT governed here. markdown.readFile accepts
+// any absolute path and is gated only on its extension whitelist, by existing
+// design — adding a second read guard there is the duplication markdown-file.ts
+// was extracted to prevent.
+//
+// CODE reads are the inversion of that, and they DO come through here:
+// code-file.ts has no whitelist at all, so resolveInRoot below is the boundary
+// standing in for one. That is why the jail is exported rather than inlined in
+// listDir — see its own header.
 //
 // TOCTOU is accepted, not solved. Between the segment walk and the readdir a
 // segment could be swapped for a link. Closing that needs handle-based
@@ -23,7 +28,7 @@ import type {
   ExplorerListError,
   ExplorerListResult,
 } from '../shared/types';
-import { isAllowedMarkdownPath } from './markdown-file';
+import { isBinaryPath } from './code-file';
 import { canonical } from './markdown-grants';
 
 /** Per-directory cap. Exceeding it sets `truncated` rather than shipping a
@@ -233,9 +238,15 @@ export async function listDir(
       kind,
       size,
       mtimeMs,
-      // A link is never viewable: markdown.readFile refuses symlinks outright,
-      // so offering one would be offering a click guaranteed to fail.
-      viewable: kind === 'file' && isAllowedMarkdownPath(dirent.name),
+      // A link is never viewable: readCodeFile refuses symlinks outright,
+      // and resolveInRoot refuses them a segment earlier.
+      //
+      // Extension check ONLY — no open() here. A 2000-entry readdir must not
+      // open 2000 files, so the content sniff is deferred to the read. That
+      // means `viewable` is a cheap tree-render hint, not a promise: a file can
+      // be viewable and still fail at open with `binary`, which the panel shows
+      // inline the same way it shows a file deleted out from under the tree.
+      viewable: kind === 'file' && !isBinaryPath(dirent.name),
     });
   }
 

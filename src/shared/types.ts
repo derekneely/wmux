@@ -134,8 +134,11 @@ export interface SurfaceRef {
 }
 
 // ─── File explorer (docs/local/specs/2026-08-25-file-explorer-design.md) ─────
-// Directory ENUMERATION is the new capability here; reads still go through
-// markdown.readFile, which is unjailed by deliberate existing design. The
+// Directory ENUMERATION was the original capability here. MARKDOWN reads still
+// go through markdown.readFile, which is unjailed by deliberate existing
+// design; CODE reads go through code:read-file, which is jailed to the same
+// root this enumeration uses and has no extension whitelist at all — the two
+// are inverses of each other, and neither widens the other. Either way the
 // renderer supplies no filesystem path at any point — only a surfaceId and a
 // relative path, both of which main validates.
 
@@ -144,7 +147,11 @@ export interface ExplorerEntry {
   kind: 'dir' | 'file' | 'symlink';
   size: number;
   mtimeMs: number;
-  /** Whether the markdown surface will read it — ALLOWED_MD_EXT.has(ext). */
+  /**
+   * Whether the tree offers this entry as clickable. A cheap NAME-based hint,
+   * not a promise: the content sniff runs at open, so a viewable file can still
+   * come back `binary`. Directories and symlinks are never viewable.
+   */
   viewable: boolean;
 }
 
