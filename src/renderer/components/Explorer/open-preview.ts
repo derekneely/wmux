@@ -1,11 +1,17 @@
-// ─── Explorer: opening a file into the markdown preview tab ──────────────────
+// ─── Explorer: opening a file into the preview tab ───────────────────────────
 // Browsing ten files makes ONE tab, not ten. The reuse rules live here rather
 // than in the panel because they are store logic and that is what the tests
 // point at.
+//
+// Since the code viewer landed there are TWO surface types behind that one tab
+// — `markdown` and `code` — and the single-preview rule holds ACROSS the pair,
+// which is the whole point: crossing from a .md to a .ts must not start a
+// second tab. A surface's type is fixed at creation, so switching types is a
+// close plus an add rather than an update; see the ordering note at that step.
 
 import { useStore } from '../../store';
 import { findLeaf, getAllPaneIds } from '../../store/split-utils';
-import type { ExplorerErrorCode, PaneId, WorkspaceId } from '../../../shared/types';
+import type { ExplorerErrorCode, PaneId, SurfaceId, WorkspaceId } from '../../../shared/types';
 
 /**
  * `markdown.readFile`'s failure codes, mapped onto the explorer's own — which
@@ -29,6 +35,25 @@ const READ_ERROR_CODES: Record<string, ExplorerErrorCode> = {
   too_large: 'read_failed',
   read_failed: 'read_failed',
 };
+
+/**
+ * The markdown surface's extension set, duplicated here rather than imported.
+ * A renderer must not import from src/main/, and it is six strings — but the
+ * two lists MUST agree, so a source-level test pins them equal (see
+ * explorer-state.test.ts's wiring pin, same technique and same reason).
+ */
+const MARKDOWN_EXT = new Set(['.md', '.markdown', '.mdx', '.txt', '.text', '.rst']);
+
+/**
+ * Which surface type this file belongs in. `dot > 0` and not `>= 0`, so a
+ * dotfile like `.gitignore` is treated as extension-less and lands in `code`
+ * rather than having `.gitignore` read as its own extension.
+ */
+function targetTypeFor(fileName: string): 'markdown' | 'code' {
+  const dot = fileName.lastIndexOf('.');
+  const ext = dot > 0 ? fileName.slice(dot).toLowerCase() : '';
+  return MARKDOWN_EXT.has(ext) ? 'markdown' : 'code';
+}
 
 /**
  * Null on success, or when a newer open superseded this one — a superseded open
@@ -61,7 +86,11 @@ export function openInPreviewTab(
   paneId: PaneId,
   filePath: string,
   fileName: string,
-  opts: { keep: boolean },
+  // `surfaceId` + `relPath` are required for a CODE file and unused for a
+  // markdown one: main addresses a code read by (surfaceId, relPath) and will
+  // not accept an absolute path from the renderer. Existing markdown callers
+  // keep working with `{ keep }` alone.
+  opts: { keep: boolean; surfaceId?: SurfaceId; relPath?: string },
 ): Promise<PreviewOpenFailure> {
   const key = `${workspaceId}:${paneId}`;
   const prev = paneQueues.get(key);
@@ -94,7 +123,7 @@ async function openOnce(
   paneId: PaneId,
   filePath: string,
   fileName: string,
-  opts: { keep: boolean },
+  opts: { keep: boolean; surfaceId?: SurfaceId; relPath?: string },
 ): Promise<PreviewOpenFailure> {
   const store = useStore.getState();
   const workspace = store.workspaces.find((w) => w.id === workspaceId);
@@ -112,9 +141,17 @@ async function openOnce(
     if (!leaf) return null;
   }
 
+  const targetType = targetTypeFor(fileName);
+  // A code read is addressed by (surfaceId, relPath) — main owns the root and
+  // the renderer never supplies an absolute path. Without them there is nothing
+  // to ask for, and inventing one would defeat the jail.
+  if (targetType === 'code' && (!opts.surfaceId || !opts.relPath)) return 'invalid_path';
+
   // 1. Already open in this pane → focus it. Same "check before adding" rule as
   //    maybeAutoOpenDiffTab (App.tsx:215).
-  const existingIndex = leaf.surfaces.findIndex((s) => s.markdownFilePath === filePath);
+  const existingIndex = leaf.surfaces.findIndex(
+    (s) => s.markdownFilePath === filePath || s.codeFilePath === filePath,
+  );
   if (existingIndex >= 0) {
     const existing = leaf.surfaces[existingIndex];
     store.selectSurface(workspaceId, targetPane, existingIndex);
@@ -126,25 +163,48 @@ async function openOnce(
 
   // 2. Find the pane's preview tab. A DIRTY one is promoted, never recycled —
   //    an unsaved edit is not discarded by a click in a tree.
-  const preview = leaf.surfaces.find((s) => s.type === 'markdown' && s.ephemeral);
+  //    One ephemeral preview per pane, SHARED across both types — that is what
+  //    keeps "browsing ten files makes ONE tab" true when the browse crosses
+  //    the markdown/code boundary.
+  const preview = leaf.surfaces.find(
+    (s) => (s.type === 'markdown' || s.type === 'code') && s.ephemeral,
+  );
   let targetSurfaceId = preview && !preview.markdownDirty ? preview.id : null;
   if (preview && preview.markdownDirty) {
     store.updateSurface(workspaceId, targetPane, preview.id, { ephemeral: undefined });
   }
 
   const mine = ++seq;
-  const read = await window.wmux.markdown.readFile(filePath);
+  const read = targetType === 'code'
+    ? await window.wmux.code.readFile(opts.surfaceId!, opts.relPath!)
+    : await window.wmux.markdown.readFile(filePath);
   if (mine !== seq) return null; // a newer open landed while this one was in flight
   // No empty tab is left behind on failure — but the failure is REPORTED, not
   // swallowed. Silence here is what made a wrong absolute path look like a
   // dead click with no explanation, and it hides every click on a file that
   // was deleted out from under the tree.
   if (!read) return 'read_failed';
-  if ('error' in read) return READ_ERROR_CODES[read.code] ?? 'read_failed';
+  if ('error' in read) {
+    // code.read-file already answers in ExplorerErrorCode, so it passes through
+    // unmapped; markdown.readFile's own codes still need the map.
+    return targetType === 'code'
+      ? (read.code as ExplorerErrorCode)
+      : (READ_ERROR_CODES[read.code] ?? 'read_failed');
+  }
 
-  // 3. No reusable preview → make one.
+  // 3. A reusable preview of the WRONG type cannot be updated in place; type is
+  //    fixed at creation. Close it and add a replacement. This runs only AFTER
+  //    the read succeeded, so a failed open never destroys the tab the user is
+  //    looking at, and only under paneQueues' serialization, so two clicks
+  //    cannot interleave a close with another open's add.
+  if (targetSurfaceId && preview && preview.type !== targetType) {
+    store.closeSurface(workspaceId, targetPane, preview.id);
+    targetSurfaceId = null;
+  }
+
+  // 4. No reusable preview → make one.
   if (!targetSurfaceId) {
-    targetSurfaceId = useStore.getState().addSurface(workspaceId, targetPane, 'markdown', {
+    targetSurfaceId = useStore.getState().addSurface(workspaceId, targetPane, targetType, {
       ephemeral: !opts.keep,
     });
     if (!targetSurfaceId) return 'read_failed';
@@ -152,12 +212,22 @@ async function openOnce(
     store.updateSurface(workspaceId, targetPane, targetSurfaceId, { ephemeral: undefined });
   }
 
-  // fileName is REQUIRED: without it markdownFileName is not updated and the
-  // tab keeps the previous file's label.
-  useStore.getState().setMarkdownContent(targetSurfaceId, read.content, {
-    filePath: read.filePath,
-    fileName,
-    mtimeMs: read.mtimeMs,
-  });
+  if (targetType === 'code') {
+    useStore.getState().updateSurface(workspaceId, targetPane, targetSurfaceId, {
+      codeContent: read.content,
+      codeFilePath: read.filePath,
+      codeFileName: fileName,
+      codeRelPath: opts.relPath,
+      codeFileMtime: read.mtimeMs,
+    });
+  } else {
+    // fileName is REQUIRED: without it markdownFileName is not updated and the
+    // tab keeps the previous file's label.
+    useStore.getState().setMarkdownContent(targetSurfaceId, read.content, {
+      filePath: read.filePath,
+      fileName,
+      mtimeMs: read.mtimeMs,
+    });
+  }
   return null;
 }

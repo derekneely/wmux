@@ -4,7 +4,8 @@ import { openInPreviewTab } from '../../src/renderer/components/Explorer/open-pr
 
 const readFile = vi.fn();
 (globalThis as any).window = (globalThis as any).window ?? {};
-(window as any).wmux = { markdown: { readFile } };
+const readCode = vi.fn();
+(window as any).wmux = { markdown: { readFile }, code: { readFile: readCode } };
 
 function setup(): { ws: any; pane: any } {
   const ws = useStore.getState().createWorkspace({ title: 'ws', shell: 'pwsh' });
@@ -23,6 +24,10 @@ beforeEach(() => {
   readFile.mockReset();
   readFile.mockImplementation(async (filePath: string) => ({
     filePath, content: `# ${filePath}`, mtimeMs: 1,
+  }));
+  readCode.mockReset();
+  readCode.mockImplementation(async (_surfaceId: string, relPath: string) => ({
+    filePath: `C:\\repo\\${relPath}`, content: 'export {}', mtimeMs: 1,
   }));
 });
 
@@ -214,5 +219,88 @@ describe('openInPreviewTab failure reporting', () => {
     await expect(openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false }))
       .resolves.toBeNull();
     expect(surfacesOf(ws).some((s) => s.markdownFilePath === 'C:\\repo\\b.md')).toBe(true);
+  });
+});
+
+describe('openInPreviewTab — code files', () => {
+  const codeOpts = { keep: false, surfaceId: 'surf-1' as any, relPath: 'index.ts' };
+
+  it('creates a code surface for a non-markdown file', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', codeOpts);
+    const code = surfacesOf(ws).filter((s) => s.type === 'code');
+    expect(code).toHaveLength(1);
+    expect(code[0].ephemeral).toBe(true);
+    expect(code[0].codeFilePath).toBe('C:\\repo\\index.ts');
+    expect(code[0].codeFileName).toBe('index.ts');
+    expect(code[0].codeRelPath).toBe('index.ts');
+    expect(code[0].codeContent).toBe('export {}');
+  });
+
+  it('still creates a markdown surface for a .md file', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    expect(surfacesOf(ws).filter((s) => s.type === 'markdown')).toHaveLength(1);
+    expect(surfacesOf(ws).filter((s) => s.type === 'code')).toHaveLength(0);
+  });
+
+  it('RECYCLES a markdown preview into a code preview — one tab, not two', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', codeOpts);
+    const previews = surfacesOf(ws).filter((s) => s.type === 'markdown' || s.type === 'code');
+    expect(previews).toHaveLength(1);
+    expect(previews[0].type).toBe('code');
+  });
+
+  it('RECYCLES a code preview back into a markdown preview', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', codeOpts);
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const previews = surfacesOf(ws).filter((s) => s.type === 'markdown' || s.type === 'code');
+    expect(previews).toHaveLength(1);
+    expect(previews[0].type).toBe('markdown');
+  });
+
+  it('promotes a DIRTY markdown preview rather than recycling it for a code file', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const md = surfacesOf(ws).find((s) => s.type === 'markdown')!;
+    const wsObj = useStore.getState().workspaces.find((w) => w.id === ws)!;
+    const paneId = (wsObj.splitTree as any).paneId;
+    useStore.getState().updateSurface(ws, paneId, md.id, { markdownDirty: true });
+    await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', codeOpts);
+    const kept = surfacesOf(ws).find((s) => s.type === 'markdown')!;
+    expect(kept.ephemeral).toBeUndefined();      // promoted, buffer intact
+    expect(surfacesOf(ws).filter((s) => s.type === 'code')).toHaveLength(1);
+  });
+
+  it('does NOT destroy the existing preview when the code read fails', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    readCode.mockResolvedValueOnce({ error: 'Not a text file', code: 'binary' });
+    const failure = await openInPreviewTab(ws, pane, 'C:\\repo\\logo.png', 'logo.png', {
+      keep: false, surfaceId: 'surf-1' as any, relPath: 'logo.png',
+    });
+    expect(failure).toBe('binary');
+    const previews = surfacesOf(ws).filter((s) => s.type === 'markdown' || s.type === 'code');
+    expect(previews).toHaveLength(1);
+    expect(previews[0].type).toBe('markdown');   // untouched
+  });
+
+  it('returns invalid_path when a code file is opened with no relPath', async () => {
+    const { ws, pane } = setup();
+    const failure = await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', { keep: false });
+    expect(failure).toBe('invalid_path');
+  });
+
+  it('still makes ONE tab from two clicks in the same tick, across a type change', async () => {
+    const { ws, pane } = setup();
+    await Promise.all([
+      openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false }),
+      openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', codeOpts),
+    ]);
+    const previews = surfacesOf(ws).filter((s) => s.type === 'markdown' || s.type === 'code');
+    expect(previews).toHaveLength(1);
   });
 });

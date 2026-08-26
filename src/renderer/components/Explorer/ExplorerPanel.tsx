@@ -10,7 +10,7 @@ import {
 import { ExplorerTree } from './ExplorerTree';
 import { openInPreviewTab } from './open-preview';
 import '../../styles/explorer.css';
-import type { PaneId } from '../../../shared/types';
+import type { PaneId, SurfaceId } from '../../../shared/types';
 
 const MAX_ROOTS = 8;
 
@@ -150,9 +150,13 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
     const absolute = absolutePathOf(row.relPath);
     setOpenError(null);
     void openInPreviewTab(
-      activeWorkspaceId, focusedPaneId ?? ('' as PaneId), absolute, row.entry.name, opts,
+      activeWorkspaceId, focusedPaneId ?? ('' as PaneId), absolute, row.entry.name,
+      // surfaceId + relPath are what a code read is addressed by — the panel is
+      // the only place that holds both, and main will not accept an absolute
+      // path from here.
+      { ...opts, surfaceId: (surfaceId ?? undefined) as SurfaceId | undefined, relPath: row.relPath },
     ).then(setOpenError, () => setOpenError('read_failed'));
-  }, [activeWorkspaceId, focusedPaneId, absRoot, absolutePathOf]);
+  }, [activeWorkspaceId, focusedPaneId, surfaceId, absRoot, absolutePathOf]);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: ExplorerRow } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
