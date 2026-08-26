@@ -30,7 +30,8 @@ import { CDPBridge } from './cdp-bridge';
 import { CDPProxy } from './cdp-proxy';
 import { AgentManager } from './agent-manager';
 import { saveNamedSession, loadNamedSession, listNamedSessions, deleteNamedSession, loadSession } from './session-persistence';
-import { listDir } from './explorer-fs';
+import { listDir, resolveInRoot } from './explorer-fs';
+import { readCodeFile } from './code-file';
 import { getExplorerRoot, forgetExplorerRoot } from './explorer-roots';
 import { sessionWindows, toRestorePayload, restoreAnswerFor } from './session-windows';
 import { loadSettings, saveSetting } from './settings-store';
@@ -1176,6 +1177,39 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       return listDir(root.realRoot, typeof relPath === 'string' ? relPath : '', {
         showHidden: !!opts?.showHidden,
       });
+    },
+  );
+
+  // Code viewer (docs/local/specs/2026-08-26-code-viewer-design.md). Same
+  // contract as EXPLORER_LIST_DIR above: surfaceId + RELATIVE path, main owns
+  // the root. This handler is where the code viewer's security boundary
+  // actually lives — code-file.ts's deny-list is a UX filter, and resolveInRoot
+  // is what keeps a renderer-supplied path inside the pane's folder.
+  ipcMain.handle(
+    IPC_CHANNELS.CODE_READ_FILE,
+    async (event, surfaceId: unknown, relPath: unknown) => {
+      // Same ownership gate, same honest `no_root` reply: it leaks nothing
+      // about whether the surface exists in another window.
+      if (!ownsLiveSurface(surfaceId, event.sender)) {
+        return { error: 'No working directory reported for this pane', code: 'no_root' };
+      }
+      const root = getExplorerRoot(surfaceId);
+      if (!root) return { error: 'No working directory reported for this pane', code: 'no_root' };
+      // A pane inside ssh reports a cwd on the OTHER machine; reading it
+      // locally would open whatever coincidentally exists at that path on
+      // Windows. detect() and not refresh(), for the reason the list-dir
+      // handler above spells out.
+      if (sshDetector.detect(surfaceId)) {
+        return { error: 'This pane is inside an SSH session', code: 'remote' };
+      }
+      // root.realRoot, never root.cwd: cwd is what the shell reported and is
+      // display-only. realRoot is the realpath'd value the jail is defined in
+      // terms of.
+      const resolved = await resolveInRoot(
+        root.realRoot, typeof relPath === 'string' ? relPath : '', 'file',
+      );
+      if ('error' in resolved) return resolved;
+      return readCodeFile(resolved.abs);
     },
   );
 

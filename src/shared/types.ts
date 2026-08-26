@@ -597,6 +597,8 @@ export const IPC_CHANNELS = {
   MARKDOWN_STAT_FILE: 'markdown:stat-file',
   // File explorer: directory enumeration, jailed to the surface's root in main.
   EXPLORER_LIST_DIR: 'explorer:list-dir',
+  // Code viewer: read one text file, jailed to the same root list-dir uses.
+  CODE_READ_FILE: 'code:read-file',
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',

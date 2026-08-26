@@ -316,6 +316,13 @@ contextBridge.exposeInMainWorld('wmux', {
     listDir: (surfaceId: string, relPath: string, opts?: { showHidden?: boolean }) =>
       ipcRenderer.invoke(IPC_CHANNELS.EXPLORER_LIST_DIR, surfaceId, relPath, opts),
   },
+  code: {
+    // Same rule as `explorer` above: a surfaceId and a RELATIVE path, never an
+    // absolute one. Reads are jailed to the pane's folder, which is what stands
+    // in for the extension whitelist markdown reads are gated on.
+    readFile: (surfaceId: string, relPath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.CODE_READ_FILE, surfaceId, relPath),
+  },
   diff: {
     getFiles: (cwd: string) => ipcRenderer.invoke(IPC_CHANNELS.DIFF_GET_FILES, cwd),
     getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke(IPC_CHANNELS.DIFF_GET_DIFF, cwd, file),
