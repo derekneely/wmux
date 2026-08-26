@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
   joinRel, sortEntries, toggleExpanded, pruneExpanded, flattenVisible, responseKey,
-  pathRoot, toAbsolutePath,
+  pathRoot, toAbsolutePath, pickRootSurface,
 } from '../../src/renderer/components/Explorer/explorer-state';
 
 const dir = (name: string): any => ({ name, kind: 'dir', size: 0, mtimeMs: 0, viewable: false });
@@ -158,6 +158,37 @@ describe('toAbsolutePath', () => {
 
   it('returns the root itself for an empty rel-path, with no dangling separator', () => {
     expect(toAbsolutePath(String.raw`C:\repo`, '')).toBe(String.raw`C:\repo`);
+  });
+});
+
+describe('pickRootSurface', () => {
+  const term = (id: string) => ({ id, type: 'terminal' });
+  const md = (id: string) => ({ id, type: 'markdown' });
+
+  it('uses the active surface when it is a terminal', () => {
+    const surfaces = [term('a'), term('b')];
+    expect(pickRootSurface(surfaces, 1, 'a')?.id).toBe('b');
+  });
+
+  it('falls back to the last active terminal when a markdown preview is active', () => {
+    // The exact regression: clicking a file in the tree opens a markdown tab in
+    // the same pane, and the tree must stay on the terminal's directory.
+    const surfaces = [term('a'), term('b'), md('p')];
+    expect(pickRootSurface(surfaces, 2, 'b')?.id).toBe('b');
+  });
+
+  it('falls back to the first terminal when the remembered one has closed', () => {
+    const surfaces = [term('a'), md('p')];
+    expect(pickRootSurface(surfaces, 1, 'gone')?.id).toBe('a');
+  });
+
+  it('ignores a remembered id that is no longer a terminal', () => {
+    const surfaces = [term('a'), md('b')];
+    expect(pickRootSurface(surfaces, 1, 'b')?.id).toBe('a');
+  });
+
+  it('returns null for a pane with no terminal at all', () => {
+    expect(pickRootSurface([md('p')], 0, null)).toBeNull();
   });
 });
 

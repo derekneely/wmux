@@ -157,3 +157,32 @@ export function toAbsolutePath(root: string, relPath: string): string {
   const tail = relPath.replace(/\//g, '\\');
   return tail ? `${base}\\${tail}` : base;
 }
+
+/**
+ * Which surface in the focused pane the tree should be rooted at.
+ *
+ * NOT simply the active one. Clicking a file in the tree opens a markdown
+ * preview tab in that same pane, which makes the markdown surface active — and
+ * a markdown surface has no reported cwd, so main answers `no_root` and the
+ * tree the user just clicked in blanks out. The explorer follows the pane's
+ * TERMINAL, so browsing a file cannot pull the ground out from under the
+ * browse.
+ *
+ * Order: the active surface when it is a terminal (the normal case, and the
+ * only one that can change roots); otherwise the terminal that was last active
+ * in this pane, if it is still open; otherwise the pane's first terminal.
+ * Null when the pane has no terminal at all — the caller keeps whatever root
+ * was last good rather than blanking.
+ */
+export function pickRootSurface<T extends { id: string; type: string }>(
+  surfaces: readonly T[],
+  activeIndex: number,
+  lastTerminalId: string | null,
+): T | null {
+  const active = surfaces[activeIndex];
+  if (active?.type === 'terminal') return active;
+  const remembered = lastTerminalId
+    ? surfaces.find((s) => s.id === lastTerminalId && s.type === 'terminal')
+    : undefined;
+  return remembered ?? surfaces.find((s) => s.type === 'terminal') ?? null;
+}

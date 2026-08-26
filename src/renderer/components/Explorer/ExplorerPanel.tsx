@@ -4,7 +4,7 @@ import { findLeaf } from '../../store/split-utils';
 import { useT } from '../../i18n';
 import type { ExplorerErrorCode, ExplorerListResult } from '../../../shared/types';
 import {
-  flattenVisible, pathRoot, pruneExpanded, responseKey, toAbsolutePath, toggleExpanded,
+  flattenVisible, pathRoot, pickRootSurface, pruneExpanded, responseKey, toAbsolutePath, toggleExpanded,
   type ExplorerRow, type ExplorerTreeState,
 } from './explorer-state';
 import { ExplorerTree } from './ExplorerTree';
@@ -26,19 +26,41 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
   const workspace = useStore((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId));
   const updateWorkspaceMetadata = useStore((s) => s.updateWorkspaceMetadata);
 
-  // The root follows the FOCUSED PANE's active surface, not the workspace: the
-  // workspace cwd is last-reporter-wins across every pane and would thrash.
+  // The root follows the FOCUSED PANE's TERMINAL, not the workspace and not
+  // whatever tab happens to be active: the workspace cwd is last-reporter-wins
+  // across every pane and would thrash, and the active tab is a markdown
+  // preview the moment the user clicks a file in this very tree — see
+  // pickRootSurface.
+  //
+  // Which terminal was last active per pane is remembered across renders, so a
+  // pane with two shells in different directories goes back to the one the user
+  // was actually in rather than to tab 0.
+  const lastTerminalByPane = useRef<Map<PaneId, string>>(new Map());
+
   const focusedSurface = useMemo(() => {
     if (!workspace || !focusedPaneId) return null;
     const leaf = findLeaf(workspace.splitTree, focusedPaneId);
-    return leaf?.surfaces[leaf.activeSurfaceIndex] ?? null;
+    if (!leaf) return null;
+    return pickRootSurface(
+      leaf.surfaces, leaf.activeSurfaceIndex, lastTerminalByPane.current.get(focusedPaneId) ?? null,
+    );
   }, [workspace, focusedPaneId]);
 
-  const surfaceId = focusedSurface?.id ?? null;
+  if (focusedPaneId && focusedSurface) lastTerminalByPane.current.set(focusedPaneId, focusedSurface.id);
+
+  // A pane with no terminal at all (a markdown- or browser-only pane) has no
+  // root to offer. Holding the last good one beats blanking the panel: the
+  // user's browsing context survives a detour into such a pane.
+  const stickyRef = useRef<{ surfaceId: string; root: string } | null>(null);
+  const liveRoot = focusedSurface?.currentCwd ?? focusedSurface?.cwd ?? '';
+  if (focusedSurface && liveRoot) stickyRef.current = { surfaceId: focusedSurface.id, root: liveRoot };
+  const sticky = stickyRef.current;
+
+  const surfaceId = (focusedSurface && liveRoot ? focusedSurface.id : sticky?.surfaceId) ?? null;
   // The cwd as REPORTED by the shell. Good enough to identify a fetch, and it
   // is what main resolves a root from — but never good enough to build a path
   // out of, which is what `absRoot` below is for.
-  const root = focusedSurface?.currentCwd ?? focusedSurface?.cwd ?? workspace?.cwd ?? '';
+  const root = (focusedSurface && liveRoot ? liveRoot : sticky?.root) ?? '';
 
   const [tree, setTree] = useState<ExplorerTreeState>({});
   const [error, setError] = useState<ExplorerErrorCode | null>(null);
