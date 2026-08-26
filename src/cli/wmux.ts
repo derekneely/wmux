@@ -409,6 +409,26 @@ const BROWSER_CMDS: Record<string, (args: string[]) => BrowserRequest> = {
   back: () => ({ method: 'browser.back', params: {}, timeoutMs: browserDeadline(0) }),
   forward: () => ({ method: 'browser.forward', params: {}, timeoutMs: browserDeadline(0) }),
   reload: () => ({ method: 'browser.reload', params: {}, timeoutMs: browserDeadline(0) }),
+  // `wmux browser engine [web|agent]` — get or flip which engine a browser
+  // surface runs on. Unlike every verb above, this is two distinct V2 methods
+  // (get vs set) rather than one passthrough shape, and the value is validated
+  // HERE rather than left to the server: rejecting a typo before a single byte
+  // reaches the pipe matches `checkFlags`'s reasoning elsewhere in this file
+  // (issue #143) and names both valid values in one place instead of two.
+  // `--surface`/`$WMUX_SURFACE_ID` reaches this like any other browser verb —
+  // via `caller`, merged in by `browserRequest` below — so the routing
+  // subtlety (a terminal surface is not a browser surface) is main's problem
+  // to resolve, not the CLI's; see `resolveCallerBrowserSurface` in index.ts.
+  engine: (args) => {
+    const value = args[2];
+    if (value === undefined) {
+      return { method: 'browser.get_engine', params: {}, timeoutMs: browserDeadline(0) };
+    }
+    if (value !== 'web' && value !== 'agent') {
+      throw new Error(`wmux browser engine: engine must be "web" or "agent" (got "${value}")`);
+    }
+    return { method: 'browser.set_engine', params: { engine: value }, timeoutMs: browserDeadline(0) };
+  },
 };
 
 /**
@@ -1382,6 +1402,40 @@ const AGENT_STATE_COMMANDS = {
     const surfaceId = getFlag(args, '--surface');
     print(await sendV2('pane.agent_state', surfaceId ? { surfaceId } : {}));
   },
+  /**
+   * Why does a pane read the way it does?
+   *
+   * `--file` is the mode worth having: it replays a captured screen through the
+   * same engine, with no running detection and without the agent installed. A
+   * rule regression is then debuggable from a `wmux read-screen` capture, on any
+   * machine, which is also how the bundled manifests were authored.
+   */
+  'detect': async (args: string[]) => {
+    // args[0] is the command name itself — every handler is called with the
+    // full argv, as cmdAgent/cmdPane do. Reading args[0] as the subcommand made
+    // `wmux detect explain` refuse itself.
+    const sub = args[1];
+    if (sub === 'reload') {
+      print(await sendV2('detect.reload', {}));
+      return;
+    }
+    if (sub !== 'explain') {
+      console.error('detect: expected `explain` or `reload`');
+      process.exit(1);
+    }
+    const rest = args.slice(2);
+    const file = getFlag(rest, '--file');
+    const surfaceId = getFlag(rest, '--surface') || process.env.WMUX_SURFACE_ID;
+    if (file) {
+      print(await sendV2('detect.explain', { file, agent: getFlag(rest, '--agent') }));
+      return;
+    }
+    if (!surfaceId) {
+      console.error('detect explain: --surface <id> or --file <path> required');
+      process.exit(1);
+    }
+    print(await sendV2('detect.explain', { surfaceId }));
+  },
 };
 
 // ─── Per-command usage + flag validation (issue #143) ────────────────────────
@@ -1511,6 +1565,7 @@ const COMMAND_SPECS = {
       'wmux browser open <url> | snapshot | click <ref> | type <ref> <text> | fill <ref> <value>',
       'wmux browser screenshot [--full] | get-text [ref] | eval <js> | wait <ref> [ms]',
       'wmux browser back | forward | reload',
+      'wmux browser engine [web|agent]   # print, or switch, this surface\'s engine',
       `  [--surface <id>]   ${SURFACE_NOTE}`,
     ].join('\n'),
     passthrough: true,
@@ -1606,8 +1661,16 @@ const COMMAND_SPECS = {
     value: ['--seq', '--surface'],
   },
   'agent-state': {
-    usage: 'wmux agent-state [--surface <id>]   (no --surface → every pane, plus the blocked list)',
+    usage: 'wmux agent-state [--surface <id>]   (no --surface → every pane, the blocked list, and every identified agent)',
     value: ['--surface'],
+  },
+  detect: {
+    usage: [
+      'wmux detect explain [--surface <id>]              (why this pane reads the way it does)',
+      'wmux detect explain --file <path> [--agent <k>]   (replay a captured screen, no live wmux needed)',
+      'wmux detect reload                                (re-read %APPDATA%\\wmux\\agent-detection)',
+    ].join('\n'),
+    value: ['--surface', '--file', '--agent'],
   },
 } satisfies Record<string, CommandSpec>;
 
@@ -1882,6 +1945,7 @@ Pane:       split [--down] [--type T] [--color-scheme NAME], close-pane, focus-p
 Layout:     layout grid --count <N> [--type terminal] [--anchor-surface <id>]
 Terminal:   send <text>, send-key <key>, read-screen [--lines N] [--surface <id>], trigger-flash
 Browser:    browser open|snapshot|click|type|fill|screenshot|get-text|eval|wait|back|forward|reload
+            browser engine [web|agent]   (print, or switch, which engine drives this browser surface)
             browser <verb> [--surface <id>]   # which pane's browser to drive
 Agent:      agent spawn [--cmd C] [--label L] [--cwd D] [--pane P] [--replace-tab] | spawn-batch|status|list|kill
 Markdown:   markdown <file>   (open a file in a new markdown view)

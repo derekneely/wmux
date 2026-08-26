@@ -97,6 +97,17 @@ export default function WorkspaceSettings() {
   // next to its button — unlike "+ Save as new preset", overwriting an
   // existing row changes data invisibly (the row itself doesn't change shape).
   const [justSavedId, setJustSavedId] = useState<string | null>(null);
+  // The picker is a convenience on top of the text field, not a replacement for
+  // it — what it returns is always an absolute path, and the field is also the
+  // only way to express `~` or `%USERPROFILE%\dev`, which is what makes a
+  // synced settings.json work on a second machine.
+  const pickDefaultCwd = () => {
+    void (async () => {
+      const res = await window.wmux?.system?.pickFolder?.();
+      if (!res || res.canceled || !res.path) return;
+      setWorkspacePrefs({ defaultCwd: res.path });
+    })();
+  };
   // Keyed by `${layoutId}:${paneId}`, not paneId alone — saving the same
   // workspace as a preset twice keeps the live pane ids on both copies
   // (freezeSurfaceCwds doesn't remint them), so a bare paneId key would flash
@@ -234,6 +245,22 @@ export default function WorkspaceSettings() {
       </p>
 
       <div className="settings-row">
+        <label className="settings-label">{t('settings.workspacePanel.detectAgentScreens', 'Read agent screens to infer state')}</label>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          checked={workspacePrefs.detectAgentScreens}
+          onChange={(e) => setWorkspacePrefs({ detectAgentScreens: e.target.checked })}
+        />
+      </div>
+      <p className="settings-hint">
+        {t(
+          'settings.workspacePanel.detectAgentScreensHint',
+          'For agents that do not report state themselves (Codex, Gemini, Aider…), match their on-screen UI against bundled rules to tell blocked from working. Runs entirely on this machine and never overrides what an agent declares — panes whose agent reports are skipped without being read at all. Override the rules in %APPDATA%\\wmux\\agent-detection, and use `wmux detect explain` to see which rule fired.',
+        )}
+      </p>
+
+      <div className="settings-row">
         <label className="settings-label">{t('settings.workspacePanel.autoOpenDiff', 'Auto-open diff tab on agent edits')}</label>
         <input
           type="checkbox"
@@ -267,6 +294,27 @@ export default function WorkspaceSettings() {
           <option value="wsl.exe">WSL</option>
         </select>
       </div>
+
+      <div className="settings-row">
+        <label className="settings-label">{t('settings.workspacePanel.defaultCwd', 'Starting directory')}</label>
+        <input
+          type="text"
+          className="settings-input"
+          value={workspacePrefs.defaultCwd}
+          onChange={(e) => setWorkspacePrefs({ defaultCwd: e.target.value })}
+          placeholder={t('settings.workspacePanel.defaultCwdPlaceholder', 'Current directory (e.g. ~\\projects)')}
+          spellCheck={false}
+        />
+        <button className="settings-button" onClick={pickDefaultCwd}>
+          {t('settings.workspacePanel.browse', 'Browse…')}
+        </button>
+      </div>
+      <p className="settings-hint">
+        {t(
+          'settings.workspacePanel.defaultCwdHint',
+          'Where a new terminal opens when nothing else decides. Splits, "Open in wmux", --cwd and restored sessions keep their own directory. ~ and %VARIABLES% are expanded; leave empty to keep the old behaviour.',
+        )}
+      </p>
 
       <div className="settings-divider" />
       <h3 className="settings-section-title">{t('settings.workspacePanel.layoutsSection', 'Saved Layouts')}</h3>

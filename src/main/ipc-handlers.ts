@@ -2,10 +2,12 @@ import { ipcMain, BrowserWindow, clipboard, shell, dialog, app, nativeTheme } fr
 import * as path from 'path';
 import { IPC_CHANNELS, SurfaceId, WindowId, WorkspaceId, AgentId, type InsertionResult } from '../shared/types';
 import { observePtyData, clearActivity } from './claude-observer';
-import { clearAgentState, noteHumanInput } from './agent-state';
+import { clearAgentState, noteHumanInput, listAgentStates } from './agent-state';
 import { PtyManager } from './pty-manager';
 import { PtyLedger, reapOrphans } from './pty-ledger';
 import { SshDetector } from './ssh-detect';
+import { agentIdentity } from './agent-identity';
+import { setDetection, forgetDetection, activeManifests } from './detection-store';
 import {
   readClipboardSource,
   regularFilePaths,
@@ -43,6 +45,21 @@ import {
   MD_DIALOG_EXTENSIONS,
 } from './markdown-file';
 import { grantMarkdownPath, isMarkdownPathGranted } from './markdown-grants';
+import { agentBrowserPath, runAgentBrowser, unwrapAgentData, type RunResult } from './agent-browser-cli';
+// The process-wide singletons. Constructing a second SessionRegistry or
+// DashboardDaemon here would hand the same stream port to two surfaces and let
+// either daemon stop the dashboard out from under the other — see the header of
+// agent-browser-runtime.ts.
+import {
+  acquireDashboardFor,
+  agentBrowserTeardownDeps,
+  closeSessionFor,
+  dashboardDaemon,
+  ensureBindableSession,
+  releaseDashboardFor,
+  sessionRegistry,
+} from './agent-browser-runtime';
+import type { AgentSession } from './agent-browser-session';
 
 // Claimed at module load, before anything can spawn a PTY, so the candidate
 // list is strictly what a PREVIOUS instance left behind (issue #139). The
@@ -72,11 +89,61 @@ function ownSurface(surfaceId: SurfaceId, webContents: Electron.WebContents): vo
   });
 }
 
+/**
+ * Close this surface's agent-browser session, if it has one. Fire-and-forget.
+ *
+ * Every caller is a teardown path — a PTY exiting, a pane closing, a renderer
+ * being destroyed — so this must never throw into one and must never make one
+ * wait. `closeSessionFor` drops the registry entry before it spawns anything,
+ * so calling this twice for one surface closes once.
+ *
+ * A session is a real Chrome. Sessions are ephemeral by design (see
+ * agent-browser-session.ts), which is exactly what makes NOT closing one here a
+ * leak rather than a cache: nothing will ever legitimately reattach to it, and
+ * on Windows it does not die with wmux either (issue #139).
+ */
+export function closeAgentBrowserSession(surfaceId: SurfaceId): void {
+  closeSessionFor(surfaceId, agentBrowserTeardownDeps).catch(() => {
+    /* teardown is best-effort by construction; see closeSessionByName */
+  });
+}
+
 function forgetSurface(surfaceId: SurfaceId): void {
   surfaceOwners.delete(surfaceId);
   insertionQueue.cancel(surfaceId);
   sshDetector.forget(surfaceId);
   forgetExplorerRoot(surfaceId);
+  agentIdentity.forget(surfaceId);
+  forgetDetection(surfaceId);
+  // Same teardown moment, same reasoning as clearing the ssh/agent state above:
+  // whatever this surface owned outside the renderer is now unreachable.
+  closeAgentBrowserSession(surfaceId);
+}
+
+/**
+ * Surfaces with a live agent session, and which renderer they belong to.
+ *
+ * Browser surfaces never reach `ownSurface` — that is the PTY create path — so
+ * without this a window closed while a pane sat in agent mode leaks its Chrome:
+ * the renderer is killed outright, and `BrowserPane`'s unmount effect (the
+ * renderer-side `disable`) does not get to run. `webContents 'destroyed'` is
+ * the only teardown signal main receives for that case.
+ */
+const agentBrowserOwners = new Map<SurfaceId, number>();
+const observedAgentWebContents = new Set<number>();
+
+function ownAgentBrowserSurface(surfaceId: SurfaceId, webContents: Electron.WebContents): void {
+  agentBrowserOwners.set(surfaceId, webContents.id);
+  if (observedAgentWebContents.has(webContents.id)) return;
+  observedAgentWebContents.add(webContents.id);
+  webContents.once('destroyed', () => {
+    observedAgentWebContents.delete(webContents.id);
+    for (const [ownedSurfaceId, ownerId] of agentBrowserOwners) {
+      if (ownerId !== webContents.id) continue;
+      agentBrowserOwners.delete(ownedSurfaceId);
+      closeAgentBrowserSession(ownedSurfaceId);
+    }
+  });
 }
 
 function ownsLiveSurface(surfaceId: unknown, webContents: Electron.WebContents): surfaceId is SurfaceId {
@@ -94,10 +161,29 @@ function ownsLiveSurface(surfaceId: unknown, webContents: Electron.WebContents):
  * needs lives there. Exported the same way ptyManager and agentManager are,
  * so index.ts can feed it the shell-integration reports directly.
  */
-export const sshDetector = new SshDetector({
-  getPid: (surfaceId) => ptyManager.getPid(surfaceId as SurfaceId),
-  liveSurfaceIds: () => ptyManager.liveSurfaceIds(),
-});
+export const sshDetector = new SshDetector(
+  {
+    getPid: (surfaceId) => ptyManager.getPid(surfaceId as SurfaceId),
+    liveSurfaceIds: () => ptyManager.liveSurfaceIds(),
+  },
+  undefined,
+  // The sweep's other half. One ~550ms PowerShell spawn now answers both "is
+  // this pane in ssh?" and "what agent is this pane running?" — the process
+  // table already carried every row's name and was throwing all but ssh.exe away.
+  (found, liveSurfaceIds) => agentIdentity.applyProbe(found, liveSurfaceIds),
+);
+
+/**
+ * Which agent, if any, each surface is running.
+ *
+ * Fed from the same two report paths as sshDetector, and for the same reason:
+ * Windows has no tty foreground process group, so the authoritative answer has
+ * to come from what wmux launched or what the shell hook says was submitted.
+ *
+ * Re-exported rather than constructed here — see the note on the singleton in
+ * agent-identity.ts for why it cannot live in this module.
+ */
+export { agentIdentity };
 
 
 
@@ -111,6 +197,294 @@ export function reapOrphanedPtys(): void {
     (err) => { console.warn('[wmux] orphan reap failed:', err?.message); },
   );
 }
+
+// ─── agent-browser engine control ──────────────────────────────────────────
+//
+// Flipping one browser surface between the `web` <webview> and the `agent`
+// engine. The renderer owns the decision (it is a per-surface toggle in the
+// pane) but owns none of the machinery: the binary, the session registry and
+// the dashboard refcount all live here.
+//
+// Everything below the argv builders is dependency-INJECTED rather than reading
+// the module singletons directly, for the same reason `agent-browser-verbs.ts`
+// is pure: the sequencing (acquire, ensure, open, bind stream / read-back,
+// close, release) is the part most likely to be wrong, and it must be testable
+// with no Chrome, no dashboard and no ports.
+
+/**
+ * Open the session's pinned tab, optionally at `currentUrl`.
+ *
+ * `--pin-tab` binds the session to its own CDP target. Without it a second
+ * pane's session can attach to the tab this one is driving, and two agents
+ * silently share one page.
+ *
+ * `about:blank` is dropped rather than passed through: it is what a browser
+ * surface reports when it has never navigated anywhere, and handing it to
+ * agent-browser would spend a page load arriving at the same nothing.
+ */
+export function agentBrowserOpenArgv(sessionName: string, currentUrl?: string): string[] {
+  const target = currentUrl && currentUrl !== 'about:blank' ? [currentUrl] : [];
+  return ['--session', sessionName, '--pin-tab', 'open', ...target];
+}
+
+/**
+ * The environment that pins a session's stream to the port wmux allocated.
+ *
+ * Load-bearing for the pane, not optional telemetry: the dashboard deep-link in
+ * `AgentSession.dashboardUrl` is `?port=<streamPort>`, so a session streaming
+ * anywhere else renders an empty dashboard.
+ *
+ * This has to be an ENV VAR on the launching `open`, and there is no second
+ * option. Streaming is already enabled by the time a session opens, on an
+ * OS-assigned port, so the obvious `stream enable --port` is rejected outright
+ * — measured against 0.35.0:
+ *
+ *     stream enable --port 9300 → exit 1, "✗ Streaming is already enabled"
+ *     stream status             → "Streaming enabled on ws://127.0.0.1:61379"
+ *
+ * whereas launching the session with the documented variable set gives
+ * "Streaming enabled on ws://127.0.0.1:9300, Connected: true", and the
+ * dashboard's own /api/sessions then reports `{"port":9300,...}` for it. The
+ * variable is only read when the session's browser is LAUNCHED, which is why it
+ * belongs on the `open` call and not on any later invocation.
+ */
+export function agentBrowserStreamEnv(streamPort: number): NodeJS.ProcessEnv {
+  return { AGENT_BROWSER_STREAM_PORT: String(streamPort) };
+}
+
+/** Read the page back before closing, so flipping to `web` lands where the agent was. */
+export function agentBrowserGetUrlArgv(sessionName: string): string[] {
+  return ['--session', sessionName, 'get', 'url'];
+}
+
+export function agentBrowserCloseArgv(sessionName: string): string[] {
+  return ['--session', sessionName, 'close'];
+}
+
+/**
+ * Schemes the read-back url may carry into the webview.
+ *
+ * This value comes from whatever page the agent navigated to, and its only
+ * consumer sets it as a `<webview>` src — so `javascript:` (and `data:`) would
+ * be script execution inside the pane chrome, sourced from a page nobody
+ * audited. Anything unrecognised is dropped and the pane falls back to its own
+ * default, which is a worse handoff but never an exploit.
+ */
+const READBACK_SCHEMES = /^(https?|file|about):/i;
+
+/**
+ * The url from a `get url` invocation, or undefined.
+ *
+ * Reads through `unwrapAgentData` rather than off `res.data` directly. The argv
+ * wmux sends carries no `--json`, so what arrives today is the bare line
+ * `https://example.com/` and stdout is the whole answer — but with `--json` the
+ * url sits at `data.url` INSIDE a `{success, data, error}` envelope, where a
+ * direct `res.data.url` finds nothing and the stdout fallback then hands the
+ * scheme test an entire JSON blob. Unwrapping first makes both forms work, so
+ * adding `--json` later cannot silently break the web handoff.
+ */
+export function readBackUrl(res: RunResult): string | undefined {
+  if (!res.ok) return undefined;
+  const payload = unwrapAgentData(res) as { url?: unknown } | null;
+  const raw = (typeof payload?.url === 'string' ? payload.url : res.stdout).trim();
+  return raw && READBACK_SCHEMES.test(raw) ? raw : undefined;
+}
+
+export interface AgentBrowserEnableResult {
+  installed: boolean;
+  dashboardUrl?: string;
+  sessionName?: string;
+}
+
+export interface AgentBrowserDisableResult {
+  url?: string;
+}
+
+/**
+ * Everything enable/disable touch that is not pure.
+ *
+ * `acquireDashboard`/`releaseDashboard` take a surfaceId because the daemon is
+ * refcounted per LIVE AGENT-MODE SURFACE, and the renderer may legitimately
+ * call enable twice for one pane (a re-enable, a remount) or disable a pane
+ * that was never enabled. Making the pair surface-scoped is what keeps the
+ * refcount balanced regardless.
+ */
+export interface AgentBrowserDeps {
+  binary: () => string | null;
+  run: (binary: string, argv: string[], env?: NodeJS.ProcessEnv) => Promise<RunResult>;
+  acquireDashboard: (surfaceId: SurfaceId) => Promise<void>;
+  releaseDashboard: (surfaceId: SurfaceId) => Promise<void>;
+  /**
+   * Awaited, because the real one is async: it probes the stream port before
+   * committing to it (`SessionRegistry.ensureBindable`). A synchronous stub is
+   * still a valid implementation, which is what keeps the tests port-free.
+   */
+  ensureSession: (surfaceId: SurfaceId) => AgentSession | Promise<AgentSession>;
+  getSession: (surfaceId: SurfaceId) => AgentSession | undefined;
+  releaseSession: (surfaceId: SurfaceId) => AgentSession | undefined;
+}
+
+/**
+ * Schemes `agentBrowserOpen` will put on a command line.
+ *
+ * Deliberately the same set `READBACK_SCHEMES` accepts, so a URL read back out
+ * of a session can always be handed straight back to it. The check is a
+ * boundary, not politeness: this value arrives from the renderer and becomes a
+ * positional argument to agent-browser, so anything not anchored to a known
+ * scheme — a bare `--flag`, a `-x`, an empty string — would be parsed as part
+ * of the command rather than as a target.
+ */
+const OPEN_SCHEMES = /^(https?|file|about):/i;
+
+/**
+ * Where the session's Chrome actually is right now.
+ *
+ * The pane cannot answer this itself: in agent mode its webview shows the
+ * dashboard, while the page lives in a Chrome outside wmux that the AGENT
+ * drives. Without this the address bar can only show the last URL the pane
+ * asked for, which stops being true the moment the agent clicks a link.
+ *
+ * Every failure answers `{}` rather than throwing. This is polled, and a
+ * transient CLI failure must degrade to "the bar keeps its last value", not to
+ * a rejected IPC call once every few seconds.
+ */
+export async function agentBrowserCurrentUrl(
+  surfaceId: SurfaceId,
+  deps: AgentBrowserDeps,
+): Promise<{ url?: string }> {
+  // No session ⇒ the surface is not in agent mode (or never got that far).
+  // Deliberately `getSession`, never `ensureSession`: a read must not create.
+  const session = deps.getSession(surfaceId);
+  if (!session) return {};
+  const binary = deps.binary();
+  if (!binary) return {};
+  try {
+    const url = readBackUrl(await deps.run(binary, agentBrowserGetUrlArgv(session.sessionName)));
+    return url ? { url } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Navigate the session. The address bar's Enter key, in agent mode.
+ *
+ * Separate from `enableAgentBrowser` because the pane used to reuse `enable`
+ * for this, and `enable` does two things navigation does not need: it acquires
+ * a dashboard reference and it relaunches the open with the stream env. Neither
+ * has any effect on a session that is already live (the stream port is read at
+ * browser LAUNCH and cannot move afterwards — see `agentBrowserStreamEnv`), so
+ * both were pure cost on every keystroke-committed URL.
+ *
+ * Requires an EXISTING session: "navigate" is meaningless for a surface that is
+ * not in agent mode, and creating one here would let a stray renderer call
+ * start a Chrome for a pane the user never flipped.
+ */
+export async function agentBrowserOpen(
+  surfaceId: SurfaceId,
+  url: string,
+  deps: AgentBrowserDeps,
+): Promise<{ ok: boolean }> {
+  const session = deps.getSession(surfaceId);
+  if (!session) return { ok: false };
+  if (typeof url !== 'string' || !OPEN_SCHEMES.test(url)) return { ok: false };
+  const binary = deps.binary();
+  if (!binary) return { ok: false };
+  try {
+    const res = await deps.run(binary, agentBrowserOpenArgv(session.sessionName, url));
+    return { ok: res.ok };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function enableAgentBrowser(
+  surfaceId: SurfaceId,
+  currentUrl: string | undefined,
+  deps: AgentBrowserDeps,
+): Promise<AgentBrowserEnableResult> {
+  const binary = deps.binary();
+  // Not an error: the renderer answers a missing binary with the setup card,
+  // and throwing here would turn an offer to install into a broken pane.
+  if (!binary) return { installed: false };
+
+  try {
+    await deps.acquireDashboard(surfaceId);
+  } catch (err) {
+    // The dashboard is OBSERVABILITY. agent-browser drives Chrome perfectly
+    // well without its viewer, so refusing to enable because the viewer did
+    // not start would trade a degraded feature for a broken one. Same call as
+    // v2-browser.ts's `agentTargetFor` makes, for the same reason.
+    console.warn('[wmux] agent-browser dashboard did not start:', (err as Error)?.message);
+  }
+
+  const session = await deps.ensureSession(surfaceId);
+  // ONE invocation, carrying the stream port in its environment. There is
+  // deliberately no follow-up `stream enable --port`: streaming is already on
+  // by the time this returns, so that call fails outright, and the port it
+  // would have tried to set is decided when the browser LAUNCHES — i.e. here.
+  // See `agentBrowserStreamEnv`.
+  await deps.run(
+    binary,
+    agentBrowserOpenArgv(session.sessionName, currentUrl),
+    agentBrowserStreamEnv(session.streamPort),
+  );
+  return { installed: true, dashboardUrl: session.dashboardUrl, sessionName: session.sessionName };
+}
+
+export async function disableAgentBrowser(
+  surfaceId: SurfaceId,
+  deps: AgentBrowserDeps,
+): Promise<AgentBrowserDisableResult> {
+  // Idempotent by design: the renderer calls this on unmount, which fires for
+  // panes that never entered agent mode at all. No session means there is
+  // nothing to close and — since `enableAgentBrowser` only ever acquires the
+  // dashboard on the path that also creates one — nothing to release either.
+  const session = deps.getSession(surfaceId);
+  if (!session) return {};
+
+  const binary = deps.binary();
+  let url: string | undefined;
+  if (binary) {
+    // Read BEFORE close; the page is gone afterwards. Failure here is
+    // tolerated rather than propagated: not knowing where the agent was is a
+    // worse handoff, but refusing to tear the session down over it would
+    // strand a Chrome and a dashboard reference for the rest of the session.
+    try {
+      url = readBackUrl(await deps.run(binary, agentBrowserGetUrlArgv(session.sessionName)));
+    } catch { /* see above */ }
+    try {
+      await deps.run(binary, agentBrowserCloseArgv(session.sessionName));
+    } catch { /* see above */ }
+  }
+
+  deps.releaseSession(surfaceId);
+  await deps.releaseDashboard(surfaceId);
+  return url ? { url } : {};
+}
+
+/**
+ * The real machine behind `AgentBrowserDeps`. Every production call uses this.
+ *
+ * The per-surface dashboard reference is NOT tracked here. It used to be, in a
+ * Set local to this module — but `v2-browser.ts` independently kept its own for
+ * the same surfaces, and a pane enabled from the UI and then driven by
+ * `wmux browser open` took two references and gave back one, so the dashboard
+ * outlived every agent pane. `acquireDashboardFor`/`releaseDashboardFor` own
+ * that bookkeeping for the whole process; both call paths go through them.
+ */
+const agentBrowserDeps: AgentBrowserDeps = {
+  binary: () => agentBrowserPath(),
+  run: (binary, argv, env) => runAgentBrowser(binary, argv, undefined, env),
+  acquireDashboard: (surfaceId) => acquireDashboardFor(surfaceId),
+  releaseDashboard: (surfaceId) => releaseDashboardFor(surfaceId),
+  // The bindable variant, not the bare `ensure()`. This is the one path that
+  // launches a browser with `AGENT_BROWSER_STREAM_PORT` set, so it is the one
+  // path where the port has to be a port the OS will actually let us have.
+  ensureSession: (surfaceId) => ensureBindableSession(surfaceId),
+  getSession: (surfaceId) => sessionRegistry.get(surfaceId),
+  releaseSession: (surfaceId) => sessionRegistry.release(surfaceId),
+};
 
 export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstance?: CDPProxy): void {
   // Toggle DevTools for the renderer window
@@ -155,6 +529,11 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
         // can call idempotent PTY_CREATE with a known id, but must not rewrite
         // where the legitimate owner's next file upload will go.
         sshDetector.setSurfaceShell(id, resolvedOptions.shell, created.shell, resolvedOptions.cwd);
+        // Same spec, same reason: `wmux agent spawn --cmd claude` and
+        // `--shell "claude --resume"` put the agent's own command line here, so
+        // this pane IS that agent for as long as it lives. Pure string work —
+        // nothing added to the synchronous create path's budget (issue #176).
+        agentIdentity.setSurfaceShell(id, resolvedOptions.shell);
       }
       // Reused PTY (idempotent create — e.g. StrictMode's double create() race):
       // the original create already wired data/exit forwarding. Re-wiring here
@@ -384,6 +763,22 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     win.setProgressBar(typeof value === 'number' ? value : -1, { mode: safeMode });
   });
 
+  /**
+   * Flash the taskbar button when an agent starts waiting on the user.
+   *
+   * Delegated to NotificationManager, which already owned both halves and
+   * already refuses to flash a FOCUSED window — the point is to reach a user
+   * looking elsewhere, and blinking the window they are in is noise they cannot
+   * act on any faster for. Windows clears the flash itself on focus, so the off
+   * path is mostly for a block that resolves while the user is still away.
+   */
+  ipcMain.on(IPC_CHANNELS.WINDOW_FLASH, (e, on: boolean) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+    if (on) notificationManager.flashTaskbar(win);
+    else notificationManager.stopFlash(win);
+  });
+
   ipcMain.on(
     IPC_CHANNELS.CDP_ATTACH,
     (_event, webContentsId: number, surfaceId?: string | null, workspaceId?: string | null) => {
@@ -400,6 +795,61 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     if (webContentsId === undefined || cdpProxyInstance?.currentWebContentsId === webContentsId) {
       cdpProxyInstance?.setWebContentsId(null);
     }
+  });
+
+  /**
+   * Cheap enough to call on every entry into agent mode — `agentBrowserPath()`
+   * is memoised (#176) and `isAvailable` is a boolean field, so neither touches
+   * the filesystem or a socket here.
+   */
+  ipcMain.handle(IPC_CHANNELS.AGENT_BROWSER_STATUS, () => ({
+    installed: agentBrowserPath() !== null,
+    dashboardAvailable: dashboardDaemon.isAvailable,
+  }));
+
+  ipcMain.handle(
+    IPC_CHANNELS.AGENT_BROWSER_ENABLE,
+    (event, surfaceId: string, currentUrl?: string) => {
+      // Record the owner BEFORE the session exists. A window destroyed while
+      // `enable` is still in flight would otherwise sweep nothing and leak the
+      // Chrome that call is in the middle of starting.
+      ownAgentBrowserSurface(surfaceId as SurfaceId, event.sender);
+      return enableAgentBrowser(surfaceId as SurfaceId, currentUrl, agentBrowserDeps);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_BROWSER_DISABLE, (_event, surfaceId: string) => {
+    agentBrowserOwners.delete(surfaceId as SurfaceId);
+    return disableAgentBrowser(surfaceId as SurfaceId, agentBrowserDeps);
+  });
+
+  /** Where the agent actually is — see the channel's note in types.ts. */
+  ipcMain.handle(IPC_CHANNELS.AGENT_BROWSER_CURRENT_URL, (_event, surfaceId: string) =>
+    agentBrowserCurrentUrl(surfaceId as SurfaceId, agentBrowserDeps));
+
+  ipcMain.handle(IPC_CHANNELS.AGENT_BROWSER_OPEN, (_event, surfaceId: string, url: string) =>
+    agentBrowserOpen(surfaceId as SurfaceId, url, agentBrowserDeps));
+
+  /**
+   * Install agent-browser in a REAL terminal pane, not a hidden child process.
+   *
+   * This is ~240 MB of npm plus a Chrome-for-Testing download, and every way it
+   * fails — a corporate proxy, EACCES on the global prefix, no network — is
+   * only diagnosable from the output. A spinner that ends in "install failed"
+   * would be strictly less useful than the scrollback the user can read, paste
+   * into an issue, and retry from.
+   */
+  ipcMain.handle(IPC_CHANNELS.AGENT_BROWSER_INSTALL, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { started: false };
+    const created = await win.webContents.executeJavaScript(`
+      window.__wmux_splitPane?.({
+        direction: 'vertical',
+        type: 'terminal',
+        startupCommands: ['npm i -g agent-browser', 'agent-browser install'],
+      }) ?? null
+    `);
+    return { started: created !== null };
   });
 
   ipcMain.handle(IPC_CHANNELS.AGENT_LIST, async (_event, workspaceId?: string) => {
@@ -566,6 +1016,27 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
       if (!handled) resolve({ ok: false, error: 'answer_agent not routed' });
     }),
   );
+
+  // Seed for the delta-only AGENT_STATE channel. A window opened after agents
+  // were already running received nothing until each next reported — a fresh
+  // window showed an empty roster beside three busy panes, and a blocked agent
+  // that is waiting reports nothing at all, so it could stay invisible forever.
+  ipcMain.handle(IPC_CHANNELS.AGENT_STATE_LIST, () => listAgentStates());
+
+  // Same bootstrap problem, same shape: AGENT_IDENTITY is delta-only, and a
+  // pane whose shell spec named an agent at create time never emits again.
+  ipcMain.handle(IPC_CHANNELS.AGENT_IDENTITY_LIST, () => agentIdentity.list());
+
+  // The detection loop's mirror. `on`, not `handle`: the renderer is reporting,
+  // not asking, and making it await an ack would put the loop's cadence on the
+  // far side of an IPC round trip.
+  ipcMain.on(IPC_CHANNELS.AGENT_DETECTION, (_event, surfaceId: string, result: any) => {
+    if (typeof surfaceId === 'string') setDetection(surfaceId, result ?? null);
+  });
+
+  // Manifests flow the other way: main owns the config directory, the renderer
+  // owns the loop that uses them.
+  ipcMain.handle(IPC_CHANNELS.AGENT_DETECTION_MANIFESTS, () => activeManifests());
 
   // Agent-integration consent (issue #132). Deliberately NOT routed through the
   // generic settings:set above: changing this decision has to reconcile the files

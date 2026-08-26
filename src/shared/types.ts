@@ -11,6 +11,19 @@ export type SplitNode =
 
 export type SurfaceType = 'terminal' | 'browser' | 'markdown' | 'diff';
 
+/**
+ * Which engine backs a `browser` surface.
+ *
+ * `web`   — the Electron <webview>. The default, always, and what every
+ *           browser surface was before agent-browser existed.
+ * `agent` — vercel-labs/agent-browser: a real Chrome driven by the CLI, shown
+ *           through its own dashboard.
+ *
+ * Absent means `web`, so an older saved session restores correctly with no
+ * migration (session-persistence.ts superset rule, #145).
+ */
+export type BrowserEngine = 'web' | 'agent';
+
 export interface SurfaceRef {
   id: SurfaceId;
   type: SurfaceType;
@@ -48,6 +61,12 @@ export interface SurfaceRef {
   claudeSessionId?: string;
   /** Initial URL for a browser surface created from a quick-launch profile (issue #32). */
   url?: string;
+  /**
+   * Which engine backs this browser surface. Absent ⇒ 'web'. Read through
+   * `engineOf()` rather than directly, so an absent or corrupt value can only
+   * ever degrade to the safe engine.
+   */
+  browserEngine?: BrowserEngine;
   /** Rendered markdown content for a `markdown` surface (issue #54). Persisted so
    *  the content survives split-tree restructures that remount the pane. */
   markdownContent?: string;
@@ -439,6 +458,26 @@ export const IPC_CHANNELS = {
   NOTIFICATION_JUMP: 'notification:jump',
   // Settings
   AGENT_ANSWER: 'agent:answer',
+  /** Bootstrap for AGENT_STATE, which is delta-only — a new window starts blind. */
+  AGENT_STATE_LIST: 'agent:state-list',
+  /**
+   * Which agent a surface is running: `{ surfaceId, kind, source }`.
+   *
+   * A separate channel from AGENT_STATE because it answers a different question
+   * (WHO, not HOW) and has a different source of truth. Carries the derived
+   * agent KIND only — never the command line it was derived from, which is the
+   * user's full typed input and routinely holds credentials.
+   */
+  AGENT_IDENTITY: 'agent:identity',
+  AGENT_IDENTITY_LIST: 'agent:identity-list',
+  /**
+   * Renderer → main mirror of what the detection loop decided, so the CLI and
+   * the pipe can answer without interrupting the thread that draws terminals.
+   * Carries the VERDICT, never the screen text it was read from.
+   */
+  AGENT_DETECTION: 'agent:detection',
+  /** Main → renderer: bundled manifests with user overrides applied. */
+  AGENT_DETECTION_MANIFESTS: 'agent:detection-manifests',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
   SETTINGS_CHANGED: 'settings:changed',
@@ -451,6 +490,8 @@ export const IPC_CHANNELS = {
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_IS_MAXIMIZED: 'window:isMaximized',
   WINDOW_SET_PROGRESS: 'window:setProgress',
+  /** Flash this window's taskbar button — an agent started waiting on the user. */
+  WINDOW_FLASH: 'window:flash',
   WINDOW_SET_BACKDROP: 'window:setBackdrop',
   WINDOW_SUPPORTS_BACKDROP: 'window:supportsBackdrop',
   WINDOW_CLOSE_SELF: 'window:closeSelf',
@@ -495,6 +536,30 @@ export const IPC_CHANNELS = {
   CDP_GET_TEXT: 'cdp:get-text',
   CDP_EVAL: 'cdp:eval',
   CDP_WAIT: 'cdp:wait',
+  /**
+   * agent-browser engine control for ONE browser surface (renderer → main).
+   *
+   * Distinct from the `browser.*`/CDP channels above, which run a verb against
+   * whichever engine a surface already has: these change WHICH engine it has,
+   * plus the install flow that makes `agent` reachable at all. The renderer
+   * cannot do any of it itself — the binary, the session registry and the
+   * dashboard refcount all live in main.
+   *
+   * `CURRENT_URL` and `OPEN` are the two exceptions to that framing, and they
+   * exist because the pane's address bar was lying. In agent mode the bar can
+   * only show the last URL the PANE asked for, while the agent navigates the
+   * real Chrome independently — so the two drift and the bar reports a page
+   * nobody is on. `CURRENT_URL` reads where the session actually is.
+   * `OPEN` is its counterpart: the pane used to reuse `ENABLE` to mean
+   * "navigate", which re-acquired the dashboard and re-bound the stream on
+   * every address-bar Enter.
+   */
+  AGENT_BROWSER_ENABLE: 'agent-browser:enable',
+  AGENT_BROWSER_DISABLE: 'agent-browser:disable',
+  AGENT_BROWSER_STATUS: 'agent-browser:status',
+  AGENT_BROWSER_INSTALL: 'agent-browser:install',
+  AGENT_BROWSER_CURRENT_URL: 'agent-browser:current-url',
+  AGENT_BROWSER_OPEN: 'agent-browser:open',
   // Active workspace query (renderer → main)
   GET_ACTIVE_WORKSPACE: 'get-active-workspace',
   // Hook events (Claude Code hooks → main → renderer)
@@ -596,4 +661,15 @@ export interface OrchestrationState {
   reviewer?: OrchestrationReviewer;
   // Client-side only — populated by the watcher so the renderer knows where to dismiss from.
   _orchDir?: string;
+}
+
+/**
+ * The engine a surface actually runs on. Never trust the raw field: it is
+ * persisted to a user-editable session file, and every unknown value must
+ * degrade to `web` — the engine that needs no external binary and so can
+ * always be rendered.
+ */
+export function engineOf(surface: { type: SurfaceType; browserEngine?: BrowserEngine }): BrowserEngine {
+  if (surface.type !== 'browser') return 'web';
+  return surface.browserEngine === 'agent' ? 'agent' : 'web';
 }

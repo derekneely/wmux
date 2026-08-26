@@ -7,12 +7,51 @@
  * attached browser independently, so concurrent agents no longer share — and
  * clobber — a single browser window. With no caller (manual human use) we fall
  * back to the legacy shared browser.
+ *
+ * ── Two engines, one set of verbs ─────────────────────────────────────────
+ * A browser surface is backed either by the Electron <webview> (`web`, the
+ * default and the only thing that existed before) or by vercel-labs
+ * agent-browser driving a real Chrome (`agent`). The engine is a property of
+ * the SURFACE, resolved here — never of the command. That is the whole design
+ * goal: the global CLAUDE.md wmux writes to every machine keeps saying
+ * `wmux browser open <url>`, so no agent anywhere has to be re-educated, and
+ * only what happens underneath changes. Consequently the two engines must be
+ * indistinguishable to a caller in everything it can observe — verb names,
+ * result shapes, and the error for a verb neither supports.
  */
+import * as fs from 'fs';
 import { BrowserWindow } from 'electron';
 import { cdpBridge } from './ipc-handlers';
+import { agentBrowserPath, runAgentBrowser, unwrapAgentData, type RunResult } from './agent-browser-cli';
+import { acquireDashboardFor, sessionRegistry } from './agent-browser-runtime';
+import type { AgentSession } from './agent-browser-session';
+import { toAgentBrowserArgv } from './agent-browser-verbs';
+import type { BrowserEngine, SurfaceId } from '../shared/types';
 
 type Respond = (result: any) => void;
 type RespondError = (code: number, message: string) => void;
+
+/**
+ * A resolved place to run a browser verb.
+ *
+ * `web` carries the guest webContents id the CDPBridge addresses; `agent`
+ * carries the agent-browser session every argv is pinned to. Resolution
+ * produces one of these once, and the command runner switches on it once — so
+ * there is exactly one place in the codebase that knows an engine exists.
+ */
+export type BrowserTarget =
+  | { kind: 'web'; wcId: number }
+  | { kind: 'agent'; session: AgentSession };
+
+/**
+ * Injected so routing is unit-testable with no Electron, no CDP and no daemon
+ * — the two things this module does that are hard to fake are precisely the
+ * two things behind this interface.
+ */
+export interface BrowserDeps {
+  bridge: typeof cdpBridge;
+  runAgent: (argv: string[], timeoutMs: number) => Promise<RunResult>;
+}
 
 function firstWindow(): BrowserWindow | null {
   const win = BrowserWindow.getAllWindows()[0];
@@ -97,49 +136,367 @@ async function resolveBrowserWcId(caller?: string): Promise<number | null> {
 
   callerBrowserSurface.set(caller, browserSurfaceId);
   boundBrowserSurfaces.add(browserSurfaceId);
+  // An agent-mode surface is not driven over CDP, so waiting for a wcId to
+  // attach is pure latency — up to the full 5s, on the first command a caller
+  // ever issues, every time. Give up immediately instead; `resolveBrowserTarget`
+  // re-reads this binding and routes it to the agent engine. The answer is the
+  // same either way, it just arrives 5s sooner, which matters because the CLI's
+  // client-side deadline is spending that time too.
+  if ((await engineForSurface(browserSurfaceId)) === 'agent') return null;
   return pollSurfaceWcId(browserSurfaceId, 5000);
 }
 
-// Run a single browser verb against an already-resolved target. Shared by the
-// single-command and batch paths so there's one source of truth (and no deeply
-// nested handler maps).
-async function runBrowserCommand(method: string, params: any, wcId: number): Promise<any> {
+/**
+ * Which engine backs this browser surface?
+ *
+ * Asked of the RENDERER, because the split tree lives in the Zustand store and
+ * main has no copy of it. Three details are load-bearing:
+ *
+ *  - EVERY window is asked, first affirmative answer wins. `firstWindow()` is
+ *    `getAllWindows()[0]`, and the surface may live in window 2 — the #143
+ *    "window ≠ workspace" mistake. `resolveBrowserWcId` has the same shape, but
+ *    its wrong answer is a benign fall-back to the shared browser, whereas a
+ *    wrong answer HERE dispatches to the wrong engine silently.
+ *  - `?.` and `?? 'web'` let this ship before the renderer half exists: a
+ *    renderer that has never heard of `__wmux_getBrowserEngine` degrades to
+ *    exactly today's behaviour instead of throwing on every browser command.
+ *  - a rejected `executeJavaScript` (renderer reloading, webContents destroyed
+ *    mid-flight) is 'web', not a failure. This runs on the hot path of every
+ *    command, where it previously did no renderer IPC at all; without the catch
+ *    it would be a brand-new way for a working command to fail -32000.
+ */
+async function engineForSurface(surfaceId: string): Promise<BrowserEngine> {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const engine = await win.webContents
+      .executeJavaScript(`window.__wmux_getBrowserEngine?.(${JSON.stringify(surfaceId)}) ?? 'web'`)
+      .catch(() => 'web');
+    if (engine === 'agent') return 'agent';
+  }
+  return 'web';
+}
+
+/**
+ * Ready an agent-mode surface: its session, and the dashboard that displays it.
+ *
+ * The dashboard reference is taken but NOT awaited, and that is the whole
+ * point. agent-browser drives Chrome perfectly well without its viewer, so the
+ * verb has nothing to gain by waiting — while a cold `dashboard start` can take
+ * 30s, which is longer than the CLI's entire client-side deadline for most
+ * verbs (see AGENT_*_MS below). Blocking here would turn "the viewer is slow"
+ * into "every browser command times out", which is precisely the failure
+ * `tests/unit/browser-timeout.test.ts` exists to prevent.
+ *
+ * The failure is logged rather than swallowed: it is invisible to the user
+ * otherwise. It is deliberately not fatal — but it is also not harmless. The
+ * pane loads the dashboard url in its webview, so a dashboard that never
+ * started would render ERR_CONNECTION_REFUSED, which reads as "my browser is
+ * broken" rather than "an optional viewer did not start". `BrowserPane` closes
+ * that gap on the renderer side: it checks `dashboardAvailable` before ever
+ * calling `loadURL` and shows a distinct no-dashboard card, so the interstitial
+ * is never painted. This log is the main-side half of the same story.
+ */
+function agentTargetFor(surfaceId: string): BrowserTarget {
+  // Deliberately NOT awaited — see above. `.catch` is what keeps an unawaited
+  // rejection from surfacing as an unhandled promise rejection.
+  acquireDashboardFor(surfaceId).catch((err: Error) => {
+    console.warn('[wmux] agent-browser dashboard did not start:', err?.message);
+  });
+  return { kind: 'agent', session: sessionRegistry.ensure(surfaceId as SurfaceId) };
+}
+
+/**
+ * Resolve where a command should run: which browser, on which engine.
+ *
+ * The engine is checked for whichever surface ends up bound, on EVERY outcome
+ * — not only when there was no wcId. That is the correctness core of this
+ * function, and the obvious shortcut is wrong:
+ *
+ * A surface TOGGLED from web to agent keeps its CDP registration. Nothing calls
+ * `cdp.detach` on a toggle, and `pruneDead()` only drops destroyed webContents,
+ * so `wcIdForSurface` keeps returning a perfectly valid, NON-null id for it.
+ * Checking the engine only on the null branch therefore misses the toggled case
+ * entirely: `resolveBrowserWcId` adopts the surface, polls, gets that stale id,
+ * and the command drives CDP against agent-browser's own dashboard SPA —
+ * corrupting the pane the user is watching, silently.
+ *
+ * The pre-check on an already-bound caller is a separate matter, and also not
+ * cosmetic: it keeps `resolveBrowserWcId` from reading an agent surface's
+ * missing wcId as "my browser died" and dropping a live #62 binding.
+ */
+export async function resolveBrowserTarget(caller?: string): Promise<BrowserTarget | null> {
+  const bound = caller ? callerBrowserSurface.get(caller) : undefined;
+  if (bound && (await engineForSurface(bound)) === 'agent') return agentTargetFor(bound);
+
+  const wcId = await resolveBrowserWcId(caller);
+
+  // Whatever `resolveBrowserWcId` settled on — a surface it just adopted, one
+  // it created, or a rebind after the old one died — is the surface this
+  // command will actually run against, so it is the one whose engine decides.
+  // `bound` was already checked above and is skipped rather than re-asked.
+  const settled = caller ? callerBrowserSurface.get(caller) : undefined;
+  if (settled && settled !== bound && (await engineForSurface(settled)) === 'agent') {
+    return agentTargetFor(settled);
+  }
+
+  return wcId === null ? null : { kind: 'web', wcId };
+}
+
+/** Does `data` actually carry `key`, as opposed to merely not contradicting it?
+ *
+ *  A `??` chain cannot answer this: `data.result ?? fallback` replaces a
+ *  perfectly good `false`, `0` or `''` with the fallback, which for
+ *  `browser.eval` means an agent that evaluated `document.hidden` gets the raw
+ *  stdout instead of `false`. */
+function hasField(data: unknown, key: string): boolean {
+  return !!data && typeof data === 'object' && key in (data as Record<string, unknown>);
+}
+
+const field = (data: unknown, key: string): any =>
+  hasField(data, key) ? (data as Record<string, unknown>)[key] : undefined;
+
+/**
+ * How many refs a snapshot tree exposes, counted from the tree itself.
+ *
+ * The `--json` payload carries a `refs` map and this is unnecessary — but the
+ * argv wmux sends for `snapshot` does not pass `--json`, so what actually
+ * arrives is the bare tree text, in which every ref appears as `[ref=e1]` /
+ * `[level=1, ref=e2]`. Counting DISTINCT ids rather than matches, because a
+ * ref can legitimately be mentioned more than once.
+ */
+function countRefs(tree: string): number {
+  return new Set([...tree.matchAll(/\bref=(e\d+)/g)].map((m) => m[1])).size;
+}
+
+/**
+ * Coerce an agent-browser result into the shape the WEB engine returns for the
+ * same verb, so a caller written against one engine keeps working against the
+ * other. This is the second half of engine indistinguishability (the first
+ * being the shared `-32601`), and the reason it lives next to the web switch:
+ * the two must be read together, and a shape changed on one side without the
+ * other is the bug this function exists to make obvious.
+ *
+ * Every branch handles BOTH forms agent-browser can answer in, because which
+ * one arrives depends on whether the verb's argv carries `--json` (only
+ * `screenshot`'s does today). With it, the payload is wrapped in
+ * `{success, data, error}` — `unwrapAgentData` strips that. Without it, the
+ * verb prints bare text and `stdout` is the whole answer. Field names below are
+ * from actual 0.35.0 output, not from the docs:
+ *
+ *     snapshot   → data.snapshot (tree) + data.refs (map keyed e1/e2)
+ *     get text   → data.text  ·  read → data.content
+ *     eval       → data.result
+ *     screenshot → data.path — a PNG on disk, NOT base64
+ */
+async function agentResultShape(method: string, res: RunResult): Promise<any> {
+  const data = unwrapAgentData(res);
+  switch (method) {
+    case 'browser.snapshot': {
+      // The web engine answers {tree, refCount}. Passing agent-browser's
+      // payload through verbatim — which is what this used to do — handed the
+      // agent a completely different object depending on the engine.
+      // `res.stdout` carries the trailing newline the CLI printed; the `--json`
+      // payload does not. Trim so the two forms of the SAME snapshot are
+      // byte-identical — an engine-parity bug small enough to be invisible
+      // until something diffs two trees and finds them different.
+      const tree: string = field(data, 'snapshot') ?? res.stdout.trimEnd();
+      const refs = field(data, 'refs');
+      return { tree, refCount: refs ? Object.keys(refs).length : countRefs(tree) };
+    }
+    case 'browser.get_text':
+      return { text: field(data, 'text') ?? field(data, 'content') ?? res.stdout };
+    case 'browser.screenshot':
+      return { data: await screenshotBase64(data, res) };
+    case 'browser.eval':
+      if (hasField(data, 'result')) return { result: field(data, 'result') };
+      // Bare stdout is text: `eval 1+1` prints `2`, where the web engine
+      // returns the number 2. Recover the value when it round-trips as JSON so
+      // the two engines agree on the TYPE, not merely on the digits.
+      return { result: jsonOrText(res.stdout) };
+    default:
+      return { ok: true };
+  }
+}
+
+/** Parse stdout as JSON when it is JSON, else hand back the trimmed text. */
+function jsonOrText(stdout: string): unknown {
+  const raw = stdout.trim();
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+/**
+ * Base64 PNG, the way the web engine answers `browser.screenshot`.
+ *
+ * `cdpBridge.screenshot` returns `Page.captureScreenshot`'s base64 `data`
+ * directly. agent-browser has no equivalent: `screenshot [selector] [path]`
+ * always WRITES A FILE and reports its path (`data.path`), with no flag to emit
+ * bytes on stdout. So parity has to be bought by reading the file back.
+ *
+ * A failed read falls through to whatever else the payload offered rather than
+ * throwing: a screenshot that cannot be encoded is worth reporting as an empty
+ * result, not worth failing the agent's whole command over.
+ */
+async function screenshotBase64(data: unknown, res: RunResult): Promise<string> {
+  const filePath = field(data, 'path');
+  if (typeof filePath === 'string' && filePath) {
+    try {
+      return (await fs.promises.readFile(filePath)).toString('base64');
+    } catch {
+      /* fall through to the shapes below */
+    }
+  }
+  return field(data, 'data') ?? field(data, 'base64') ?? res.stdout.trim();
+}
+
+/**
+ * What went wrong when an agent-browser invocation failed.
+ *
+ * `spawnFailed` and a non-zero exit are opposite problems and must not be
+ * collapsed into one message (see `RunResult.spawnFailed`). A non-zero exit is
+ * the CLI reporting on the page — its `stderr` is the useful thing and belongs
+ * verbatim in front of the agent. A spawn failure means the process never ran:
+ * `stderr` is empty, so echoing it would surface a blank error for what is
+ * really a wmux/install fault, and the actionable advice ("re-resolve the
+ * binary") is something no page-level message could convey. The thrown error
+ * carries `spawnFailed` as a property too, so a caller can react rather than
+ * having to pattern-match English.
+ */
+function agentFailure(method: string, res: RunResult): Error {
+  if (res.spawnFailed) {
+    return Object.assign(
+      new Error(
+        `agent-browser could not be launched for ${method} — the binary may have moved or been uninstalled. ` +
+        `Reopen the pane in agent mode to re-resolve it.`,
+      ),
+      { spawnFailed: true },
+    );
+  }
+  // A `--json` failure carries the reason in the envelope's `error` field
+  // (`{"success":false,"data":null,"error":"Unknown ref: e1"}`) and prints the
+  // same thing to stderr as `✗ Unknown ref: e1`. Prefer the structured field —
+  // it is the message without the decoration — and fall back to the streams.
+  const enveloped = res.data as { error?: unknown } | null;
+  const structured = typeof enveloped?.error === 'string' ? enveloped.error.trim() : '';
+  return Object.assign(
+    new Error(structured || res.stderr.trim() || res.stdout.trim() || `agent-browser ${method} failed`),
+    { spawnFailed: false },
+  );
+}
+
+/**
+ * Run one browser verb against an already-resolved target. Shared by the
+ * single-command and batch paths so there's one source of truth (and no deeply
+ * nested handler maps).
+ */
+export async function runBrowserCommandForTarget(
+  method: string,
+  params: any,
+  target: BrowserTarget,
+  deps: BrowserDeps,
+): Promise<any> {
+  if (target.kind === 'agent') {
+    // Built FIRST, before anything is spawned: an unsupported verb must cost a
+    // rejected message, not a Chrome round-trip. `toAgentBrowserArgv` throws
+    // the identical -32601 the web switch below does, which is what makes the
+    // engines indistinguishable for an unknown verb.
+    const argv = toAgentBrowserArgv(method, params, target.session.sessionName);
+    const res = await deps.runAgent(argv, agentTimeoutFor(method, params));
+    if (!res.ok) throw agentFailure(method, res);
+    return await agentResultShape(method, res);
+  }
+
+  const { wcId } = target;
+  const bridge = deps.bridge;
   switch (method) {
     case 'browser.navigate':
-      await cdpBridge.navigate(params?.url, params?.timeout, wcId);
+      await bridge.navigate(params?.url, params?.timeout, wcId);
       return { ok: true };
     case 'browser.snapshot':
-      return cdpBridge.snapshot(wcId);
+      return bridge.snapshot(wcId);
     case 'browser.click':
-      await cdpBridge.click(params?.ref, wcId);
+      await bridge.click(params?.ref, wcId);
       return { ok: true };
     case 'browser.type':
-      await cdpBridge.type(params?.ref, params?.text, wcId);
+      await bridge.type(params?.ref, params?.text, wcId);
       return { ok: true };
     case 'browser.fill':
-      await cdpBridge.fill(params?.ref, params?.value, wcId);
+      await bridge.fill(params?.ref, params?.value, wcId);
       return { ok: true };
     case 'browser.screenshot':
-      return { data: await cdpBridge.screenshot(params?.fullPage, wcId) };
+      return { data: await bridge.screenshot(params?.fullPage, wcId) };
     case 'browser.get_text':
-      return { text: await cdpBridge.getText(params?.ref, wcId) };
+      return { text: await bridge.getText(params?.ref, wcId) };
     case 'browser.eval':
-      return { result: await cdpBridge.evaluate(params?.js, wcId) };
+      return { result: await bridge.evaluate(params?.js, wcId) };
     case 'browser.wait':
-      await cdpBridge.wait(params?.ref, params?.timeout, wcId);
+      await bridge.wait(params?.ref, params?.timeout, wcId);
+      return { ok: true };
+    case 'browser.back':
+      await bridge.goBack(wcId);
+      return { ok: true };
+    case 'browser.forward':
+      await bridge.goForward(wcId);
+      return { ok: true };
+    case 'browser.reload':
+      await bridge.reload(wcId);
       return { ok: true };
     default:
       throw Object.assign(new Error(`Unknown: ${method}`), { rpcCode: -32601 });
   }
 }
 
+/**
+ * ── Agent-engine budgets ───────────────────────────────────────────────────
+ *
+ * How long one agent-browser invocation may run. These are NOT free-floating:
+ * the CLI hangs up on its own deadline (`browserDeadline()` in
+ * `src/cli/wmux.ts` = BROWSER_READY_MS + verb + BROWSER_SLACK_MS), and a server
+ * budget larger than that deadline is not a longer budget — it is an
+ * UNREPORTABLE one. The client is already gone, so a command that overruns
+ * prints a bare `timed out` and the server's real diagnosis
+ * ('agent-browser … failed: …') never reaches the user. That is exactly the
+ * regression `tests/unit/browser-timeout.test.ts` was written to prevent, and
+ * it now checks these numbers against the CLI's directly.
+ *
+ * Sizing, against a CLI that allows READY(5000) + verb + SLACK(5000):
+ *   navigate — 30000, matching cdp-bridge's own navigate budget; CLI allows 40000.
+ *   wait     — the caller's own timeout when given, else 10000, matching
+ *              cdp-bridge's wait(); the CLI scales its deadline the same way.
+ *   the rest — 4000. The CLI allows 10000 total for them, and readiness can
+ *              legitimately eat 5000 of it (`pollSurfaceWcId`), so anything
+ *              larger could not be reported.
+ */
+const AGENT_NAVIGATE_MS = 30000;
+const AGENT_WAIT_MS = 10000;
+const AGENT_VERB_MS = 4000;
+
+function agentTimeoutFor(method: string, params: any): number {
+  if (method === 'browser.navigate') return AGENT_NAVIGATE_MS;
+  if (method === 'browser.wait') {
+    return typeof params?.timeout === 'number' ? params.timeout : AGENT_WAIT_MS;
+  }
+  return AGENT_VERB_MS;
+}
+
+/** The real machine behind `BrowserDeps`. Every production call uses this. */
+const defaultDeps: BrowserDeps = {
+  bridge: cdpBridge,
+  runAgent: async (argv, timeoutMs) => {
+    const binary = agentBrowserPath();
+    if (!binary) {
+      throw new Error('agent-browser is not installed — open a browser tab in agent mode to install it');
+    }
+    return runAgentBrowser(binary, argv, timeoutMs);
+  },
+};
+
 async function handleBrowserBatch(params: any, respond: Respond, respondError: RespondError): Promise<void> {
-  const wcId = await resolveBrowserWcId(params?.caller);
-  if (wcId === null) { respondError(-32000, 'Could not open browser panel'); return; }
+  const target = await resolveBrowserTarget(params?.caller);
+  if (target === null) { respondError(-32000, 'Could not open browser panel'); return; }
   const results: any[] = [];
   for (const cmd of params?.commands || []) {
     try {
-      results.push({ result: await runBrowserCommand(cmd.method, cmd.params, wcId) });
+      results.push({ result: await runBrowserCommandForTarget(cmd.method, cmd.params, target, defaultDeps) });
     } catch (err: any) {
       results.push({ error: { code: err.rpcCode ?? -32000, message: err.message } });
       break;
@@ -160,8 +517,12 @@ export function handleBrowserV2(
       await handleBrowserBatch(params, respond, respondError);
       return;
     }
-    const wcId = await resolveBrowserWcId(params?.caller);
-    if (wcId === null) { respondError(-32000, 'Could not open browser panel'); return; }
-    respond(await runBrowserCommand(method, params, wcId));
-  })().catch((err: any) => respondError(-32000, err.message));
+    const target = await resolveBrowserTarget(params?.caller);
+    if (target === null) { respondError(-32000, 'Could not open browser panel'); return; }
+    respond(await runBrowserCommandForTarget(method, params, target, defaultDeps));
+    // `err.rpcCode ?? -32000`, matching the batch loop. It used to be a flat
+    // -32000 here, so an unknown verb reported -32601 inside a batch and -32000
+    // as a single command — undoing, one frame up, the engine-indistinguishable
+    // -32601 that runBrowserCommandForTarget goes to some trouble to produce.
+  })().catch((err: any) => respondError(err?.rpcCode ?? -32000, err?.message));
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { subcommandError } from '../../src/cli/wmux';
+import { subcommandError, browserRequest } from '../../src/cli/wmux';
 
 /**
  * `wmux browser`, `wmux agent` and `wmux pane` with no subcommand printed the
@@ -54,5 +54,86 @@ describe('group commands with no subcommand (issue #156)', () => {
     for (const command of ['browser', 'agent', 'pane', 'layout']) {
       expect(cli).toContain(`failSubcommand('${command}'`);
     }
+  });
+});
+
+/**
+ * Every handler is invoked as `handler(args)` where args[0] is the COMMAND
+ * NAME — cmdAgent and cmdPane both read args[1] for their subcommand. `detect`
+ * read args[0], so `wmux detect explain` rejected itself with "expected
+ * `explain` or `reload`". Only running it found this; the unit tests exercised
+ * the engine and the RPC, never the argv seam between them.
+ */
+describe('subcommand dispatch reads args[1], not args[0]', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'src', 'cli', 'wmux.ts'),
+    'utf8',
+  );
+
+  it('the detect handler takes its subcommand from args[1]', () => {
+    const body = source.slice(source.indexOf("'detect': async (args: string[])"));
+    const handler = body.slice(0, body.indexOf('\n  },'));
+    expect(handler).toContain('const sub = args[1]');
+    expect(handler).not.toMatch(/const sub = args\[0\]/);
+  });
+
+  it('and slices its flags from index 2, so --file is not eaten as the subcommand', () => {
+    const body = source.slice(source.indexOf("'detect': async (args: string[])"));
+    const handler = body.slice(0, body.indexOf('\n  },'));
+    expect(handler).toContain('args.slice(2)');
+  });
+
+  /** The convention this broke — kept honest for the next subcommand added. */
+  it('matches how the other group commands dispatch', () => {
+    expect(source).toMatch(/AGENT_CMDS\[args\[1\]\]/);
+  });
+});
+
+/**
+ * `wmux browser engine [web|agent] [--surface <id>]` — get or flip which
+ * engine a browser surface runs on (Task 12). Unlike every other `browser`
+ * subcommand, this one is two distinct V2 methods depending on whether a
+ * value was given, and it validates that value client-side rather than
+ * leaving a typo to round-trip to the server and back.
+ */
+describe('browser engine', () => {
+  it('a bare "engine" asks the server what engine this surface is on', () => {
+    const req = browserRequest(['browser', 'engine']);
+    expect(req?.method).toBe('browser.get_engine');
+    expect(req?.params).not.toHaveProperty('engine');
+  });
+
+  it('"engine agent" asks to switch to agent-browser', () => {
+    const req = browserRequest(['browser', 'engine', 'agent']);
+    expect(req?.method).toBe('browser.set_engine');
+    expect(req?.params.engine).toBe('agent');
+  });
+
+  it('"engine web" asks to switch back to the built-in webview', () => {
+    const req = browserRequest(['browser', 'engine', 'web']);
+    expect(req?.method).toBe('browser.set_engine');
+    expect(req?.params.engine).toBe('web');
+  });
+
+  it('carries --surface through as the caller, same as every other browser verb', () => {
+    // cmdBrowser extracts --surface (or $WMUX_SURFACE_ID) and passes it into
+    // browserRequest as `caller` — the same mechanism every other browser
+    // subcommand already uses, so no extra CLI code was needed for this.
+    const req = browserRequest(['browser', 'engine', 'web'], 'surf-1');
+    expect(req?.method).toBe('browser.set_engine');
+    expect(req?.params.engine).toBe('web');
+    expect(req?.params.caller).toBe('surf-1');
+  });
+
+  it('rejects anything other than exactly "web" or "agent", naming both', () => {
+    expect(() => browserRequest(['browser', 'engine', 'bogus'])).toThrow(/web/);
+    expect(() => browserRequest(['browser', 'engine', 'bogus'])).toThrow(/agent/);
+  });
+
+  it('does not silently coerce a near-miss value', () => {
+    // Case and whitespace variants must fail exactly like any other typo —
+    // "Do not silently coerce" from the task spec, spelled out as a test.
+    expect(() => browserRequest(['browser', 'engine', 'Web'])).toThrow();
+    expect(() => browserRequest(['browser', 'engine', ' web'])).toThrow();
   });
 });

@@ -154,6 +154,9 @@ export type ShortcutAction =
   | 'nextSurface'
   | 'prevSurface'
   | 'jumpToUnread'
+  | 'jumpToBlocked'
+  | 'openAgentNavigator'
+  | 'openHub'
   | 'showNotifications'
   | 'flashFocused'
   | 'openBrowser'
@@ -265,6 +268,19 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, ShortcutBinding> = {
   // reaches the terminal. Users wanting VS Code muscle memory can swap the two
   // in Settings → Keyboard, which is what #202/#203 landed for.
   toggleExplorer:    { key: 'x', ctrl: true, shift: true },
+  // ─── Agent roster ───────────────────────────────────────────────────────────
+  // Ctrl+Shift+B and Ctrl+Shift+A were both unbound. Shift-modified like every
+  // batch above, so isSafeToIntercept keeps bare Ctrl+A (start-of-line in every
+  // shell) and Ctrl+B (tmux prefix, for users running tmux inside a pane) going
+  // to the terminal untouched.
+  //
+  // Bound by DEFAULT rather than shipped blank: the whole feature is "find the
+  // stuck agent without hunting", and a keystroke the user must first discover
+  // in Settings is one they will not have when they need it.
+  jumpToBlocked:          { key: 'b', ctrl: true, shift: true },
+  openAgentNavigator:     { key: 'a', ctrl: true, shift: true },
+  // Ctrl+Shift+O was unbound (bare Ctrl+O already opens a folder).
+  openHub:                { key: 'o', ctrl: true, shift: true },
 };
 
 // ─── Sidebar settings ─────────────────────────────────────────────────────────
@@ -297,6 +313,20 @@ export interface WorkspacePrefs {
   newWorkspacePlacement: 'afterCurrent' | 'top' | 'end';
   autoReorderOnNotification: boolean;
   defaultShell: string;
+  /**
+   * Directory new terminals start in when nothing else has said where (issue
+   * #205). A FALLBACK, never an override: a split inherits its parent's
+   * directory, "Open in wmux" and `--cwd` name one outright, and a restored
+   * session carries the one it was frozen at — all of those still win. This
+   * only fills the hole that was previously filled by wherever wmux.exe itself
+   * was launched from, which for a taskbar/Start-menu launch is
+   * C:\Windows\system32.
+   *
+   * Stored exactly as typed. `~` and `%VAR%` are expanded at spawn time by
+   * resolveSpawnCwd, so a path stays portable across machines instead of being
+   * frozen to whatever the picker resolved on the day it was set.
+   */
+  defaultCwd: string;
   /** Show the welcome/tutorial screen on first launch (issue #22). */
   showWelcomeScreen: boolean;
   /**
@@ -314,6 +344,19 @@ export interface WorkspacePrefs {
    * Programmatic closes (CLI/agents via the pipe) never prompt.
    */
   confirmWorkspaceClose: boolean;
+  /**
+   * Read agent TUIs off the screen to infer blocked/working/idle for agents
+   * that do not report state themselves (Codex, Gemini, Aider, …).
+   *
+   * On by default: it only ever fills a gap. Detection is ranked strictly below
+   * declared state and can never override it, so a user whose agents all report
+   * is unaffected — their panes are skipped without being scanned at all.
+   *
+   * The escape hatch matters anyway. This reads the terminal buffer several
+   * times a second, and a user who does not want their screen contents pattern
+   * matched — however locally — should be able to say so in one click.
+   */
+  detectAgentScreens: boolean;
   /**
    * Which `savedLayouts` entry (by id) new workspaces start with — Ctrl+N, the
    * sidebar "+" button, CLI `wmux new-workspace`, "Open folder as workspace",
@@ -344,11 +387,13 @@ export const DEFAULT_WORKSPACE_PREFS: WorkspacePrefs = {
   newWorkspacePlacement: 'afterCurrent',
   autoReorderOnNotification: false,
   defaultShell: '',
+  defaultCwd: '',
   showWelcomeScreen: true,
   autoOpenDiffTab: true,
   confirmWorkspaceClose: false,
   defaultLayoutId: null,
   restoreClaudeSessions: false,
+  detectAgentScreens: true,
 };
 
 // ─── Terminal settings ────────────────────────────────────────────────────────
@@ -560,6 +605,19 @@ export interface AppearancePrefs {
    * against — see UI_MODE_DEFAULT_REV.
    */
   uiModeDefaultRev: number;
+  /**
+   * The agent office. On by default since 2.3.0 — it shipped in 2.2.0 as a
+   * quiet easter egg (no titlebar button, inert shortcut until the toggle was
+   * found) and is now surfaced for everyone. Turning it off restores exactly
+   * that quiet state, so the toggle is still the whole feature flag: titlebar
+   * button, Ctrl+Shift+O, command palette entry and cheat-sheet row all read it.
+   */
+  hubEnabled: boolean;
+  /**
+   * Which generation of the `hubEnabled` default this blob has been reconciled
+   * against — see HUB_DEFAULT_REV.
+   */
+  hubDefaultRev: number;
 }
 
 /**
@@ -577,6 +635,24 @@ export interface AppearancePrefs {
  */
 export const UI_MODE_DEFAULT_REV = 1;
 
+/**
+ * Same mechanism as UI_MODE_DEFAULT_REV, for `hubEnabled` — and deliberately a
+ * SEPARATE counter rather than a bump of that one.
+ *
+ * They share a persisted block but not a decision. Bumping the uiMode rev to
+ * promote the office would re-promote `uiMode` at the same time, dragging back
+ * to TRACE every user who deliberately picked classic after 1.5.0 — the exact
+ * thing `loadAppearancePrefs` promises not to do. One rev per migrated default
+ * keeps each promotion independent and each post-promotion choice sticky.
+ *
+ * 1 — 2.3.0, the agent office is on for everyone. Note this cannot tell "found
+ * the 2.2.0 toggle and switched it off" from "never touched it": both are
+ * `hubEnabled: false` on disk. The egg was only discoverable for one release,
+ * so the promotion is accepted as overriding that small set once; anyone who
+ * turns it off after the promotion keeps it off.
+ */
+export const HUB_DEFAULT_REV = 1;
+
 export const DEFAULT_APPEARANCE_PREFS: AppearancePrefs = {
   // Defaults to 'dark' rather than 'system' — wmux shipped dark-only up to
   // 0.14.0, so existing users' chrome must not change color on first launch
@@ -589,30 +665,68 @@ export const DEFAULT_APPEARANCE_PREFS: AppearancePrefs = {
   windowMaterial: 'clear',
   uiMode: 'trace',
   uiModeDefaultRev: UI_MODE_DEFAULT_REV,
+  hubEnabled: true,
+  hubDefaultRev: HUB_DEFAULT_REV,
 };
 
 /**
- * appearancePrefs needs a loader of its own because it is the one pref block
- * whose default has been changed under existing users (issue: TRACE by default).
+ * appearancePrefs needs a loader of its own because it is the block whose
+ * defaults have been changed under existing users (TRACE in 1.5.0, the agent
+ * office in 2.3.0).
  *
- * The rev is read off the RAW stored blob, deliberately not off the merged one:
- * the defaults carry the current rev, so merging first would make every legacy
- * blob look already-migrated and the promotion would never fire.
+ * Every rev is read off the RAW stored blob, deliberately not off the merged
+ * one: the defaults carry the current revs, so merging first would make every
+ * legacy blob look already-migrated and no promotion would ever fire. This is
+ * the bug to look for if a migration seems to do nothing.
+ *
+ * Promotions are INDEPENDENT — one rev per migrated field, each evaluated and
+ * stamped on its own. A user can be due the office promotion while their uiMode
+ * choice is already settled, and promoting the one must not disturb the other.
  */
+const APPEARANCE_PROMOTIONS: ReadonlyArray<{
+  rev: 'uiModeDefaultRev' | 'hubDefaultRev';
+  current: number;
+  /**
+   * Applied in place on the merged blob. The field and its rev are stamped
+   * together here on purpose: keeping them in one typed closure makes
+   * "promoted the value but forgot the rev" — which re-promotes on every launch
+   * forever — unrepresentable rather than merely discouraged.
+   */
+  apply: (prefs: AppearancePrefs) => void;
+}> = [
+  {
+    rev: 'uiModeDefaultRev',
+    current: UI_MODE_DEFAULT_REV,
+    apply: (prefs) => {
+      prefs.uiMode = DEFAULT_APPEARANCE_PREFS.uiMode;
+      prefs.uiModeDefaultRev = UI_MODE_DEFAULT_REV;
+    },
+  },
+  {
+    rev: 'hubDefaultRev',
+    current: HUB_DEFAULT_REV,
+    apply: (prefs) => {
+      prefs.hubEnabled = DEFAULT_APPEARANCE_PREFS.hubEnabled;
+      prefs.hubDefaultRev = HUB_DEFAULT_REV;
+    },
+  },
+];
+
 export function loadAppearancePrefs(): AppearancePrefs {
   const stored = loadPersisted<AppearancePrefs>(STORAGE_KEYS.appearancePrefs);
   const merged = { ...DEFAULT_APPEARANCE_PREFS, ...stored };
-  if ((stored.uiModeDefaultRev ?? 0) >= UI_MODE_DEFAULT_REV) return merged;
 
-  const promoted: AppearancePrefs = {
-    ...merged,
-    uiMode: DEFAULT_APPEARANCE_PREFS.uiMode,
-    uiModeDefaultRev: UI_MODE_DEFAULT_REV,
-  };
+  const due = APPEARANCE_PROMOTIONS.filter(
+    (p) => ((stored[p.rev] as number | undefined) ?? 0) < p.current,
+  );
+  if (due.length === 0) return merged;
+
+  const promoted: AppearancePrefs = { ...merged };
+  for (const p of due) p.apply(promoted);
   // Write it back now rather than waiting for the next settings edit: the rev
   // has to be on disk for this to stay a ONE-time promotion. Without the write,
-  // a user who switches back to classic and never opens Settings again would be
-  // re-promoted on every launch.
+  // a user who switches the field back and never opens Settings again would be
+  // re-promoted on every launch — worse than never changing the default.
   persist(STORAGE_KEYS.appearancePrefs, promoted);
   return promoted;
 }
