@@ -142,6 +142,8 @@ export type ExplorerErrorCode =
   | 'outside_root'    // escaped the jail
   | 'not_found'
   | 'not_a_directory'
+  | 'binary'          // deny-listed extension, or the content sniff rejected it
+  | 'too_large'       // exceeds MAX_CODE_BYTES
   | 'denied'          // EACCES/EPERM
   | 'read_failed';
 

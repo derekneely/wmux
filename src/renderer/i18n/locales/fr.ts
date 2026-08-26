@@ -333,7 +333,7 @@ export const fr: Translation = {
   'explorer.close': "Fermer l'explorateur",
   'explorer.empty': 'Ce dossier est vide',
   'explorer.truncated': 'Affichage des {count} premières entrées',
-  'explorer.notViewable': 'wmux ne peut ouvrir que des fichiers markdown et texte',
+  'explorer.notViewable': 'wmux ne peut ouvrir que des fichiers texte',
   'explorer.copyPath': 'Copier le chemin',
   'explorer.reveal': "Révéler dans l'explorateur de fichiers",
   'explorer.openInApp': "Ouvrir dans l'application par défaut",
@@ -343,6 +343,8 @@ export const fr: Translation = {
   'explorer.error.outside_root': 'Ce chemin est en dehors du dossier du volet',
   'explorer.error.not_found': 'Dossier introuvable',
   'explorer.error.not_a_directory': "Ce n'est pas un dossier",
+  'explorer.error.binary': "Ce fichier n'est pas du texte",
+  'explorer.error.too_large': 'Ce fichier est trop volumineux pour être affiché',
   'explorer.error.denied': 'Permission refusée',
   'explorer.error.read_failed': 'Impossible de lire le dossier',
   // Paramètres — Panneau des profils de lancement rapide

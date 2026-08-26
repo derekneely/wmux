@@ -279,7 +279,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
           </div>
           {!contextMenu.row.entry.viewable && (
             <div className="explorer-panel__ctx-hint">
-              {t('explorer.notViewable', 'wmux can only open markdown and text files')}
+              {t('explorer.notViewable', 'wmux can only open text files')}
             </div>
           )}
         </div>

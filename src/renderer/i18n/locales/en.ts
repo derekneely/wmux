@@ -369,7 +369,7 @@ export const en = {
   'explorer.close': 'Close explorer',
   'explorer.empty': 'This folder is empty',
   'explorer.truncated': 'Showing the first {count} entries',
-  'explorer.notViewable': 'wmux can only open markdown and text files',
+  'explorer.notViewable': 'wmux can only open text files',
   'explorer.copyPath': 'Copy path',
   'explorer.reveal': 'Reveal in File Explorer',
   'explorer.openInApp': 'Open in default app',
@@ -379,6 +379,8 @@ export const en = {
   'explorer.error.outside_root': 'That path is outside the pane folder',
   'explorer.error.not_found': 'Folder not found',
   'explorer.error.not_a_directory': 'Not a folder',
+  'explorer.error.binary': 'That file is not text',
+  'explorer.error.too_large': 'That file is too large to view',
   'explorer.error.denied': 'Permission denied',
   'explorer.error.read_failed': 'Could not read the folder',
   // Settings — Quick-launch profiles panel
