@@ -93,23 +93,33 @@ function toPosix(p: string): string {
 }
 
 /**
- * List one directory under `root`.
+ * The jail, shared by every caller that turns a renderer-supplied `relPath`
+ * into an absolute path under a trusted root.
  *
- * Pure w.r.t. wmux state: resolving WHICH root belongs to a surface is the IPC
- * handler's job (explorer-roots.ts), which is what keeps this testable without
- * faking surface state.
+ * Extracted out of listDir so directory enumeration and file reading cannot
+ * drift apart — a second copy of a segment walk is exactly the duplication
+ * this module's header refuses. `leaf` is the ONLY difference between the two
+ * callers: listDir needs the final segment to be a directory, a code read
+ * needs it to be a regular file. Every INTERMEDIATE segment is a directory
+ * either way, and no segment may be a symlink.
  */
-export async function listDir(
+export async function resolveInRoot(
   root: string,
   relPath: string,
-  opts: { showHidden?: boolean } = {},
-): Promise<ExplorerListResult> {
+  leaf: 'dir' | 'file',
+): Promise<{ abs: string } | ExplorerListError> {
   const invalid = validateRelPath(relPath);
   if (invalid) return fail('Invalid path', invalid);
 
   const rootAbs = path.resolve(root);
   const abs = path.resolve(rootAbs, relPath);
   const rel = path.relative(rootAbs, abs);
+
+  // The root itself is a directory by construction, so asking for a file at
+  // the empty path is a caller bug, not a filesystem outcome. Answering
+  // invalid_path here keeps the segment loop below from silently accepting it
+  // by iterating zero times.
+  if (rel === '' && leaf === 'file') return fail('Invalid path', 'invalid_path');
 
   // isAbsolute(rel) would be the cross-drive case: path.relative returns an
   // absolute path rather than a '..' chain when the two live on different
@@ -139,9 +149,10 @@ export async function listDir(
   // follows `link` before the final lstat ever runs. libuv maps Windows
   // reparse points onto symlinks, so `mklink /J` junctions report
   // isSymbolicLink() === true and this one check covers both.
+  const segments = rel === '' ? [] : rel.split(path.sep);
   let cursor = rootAbs;
-  for (const segment of rel === '' ? [] : rel.split(path.sep)) {
-    cursor = path.join(cursor, segment);
+  for (let i = 0; i < segments.length; i++) {
+    cursor = path.join(cursor, segments[i]);
     let st: fs.Stats;
     try {
       st = await fs.promises.lstat(cursor);
@@ -149,8 +160,38 @@ export async function listDir(
       return mapErrno(err);
     }
     if (st.isSymbolicLink()) return fail('Path is outside the root', 'outside_root');
-    if (!st.isDirectory()) return fail('Not a directory', 'not_a_directory');
+    const isLast = i === segments.length - 1;
+    if (!isLast || leaf === 'dir') {
+      if (!st.isDirectory()) return fail('Not a directory', 'not_a_directory');
+    } else if (!st.isFile()) {
+      // A directory where a file was expected. Reusing invalid_path rather
+      // than inventing a third code: the user clicked something the tree
+      // rendered as a file, so the tree and the disk disagree — which is the
+      // same class of answer invalid_path already carries.
+      return fail('Not a regular file', 'invalid_path');
+    }
   }
+
+  return { abs };
+}
+
+/**
+ * List one directory under `root`.
+ *
+ * Pure w.r.t. wmux state: resolving WHICH root belongs to a surface is the IPC
+ * handler's job (explorer-roots.ts), which is what keeps this testable without
+ * faking surface state.
+ */
+export async function listDir(
+  root: string,
+  relPath: string,
+  opts: { showHidden?: boolean } = {},
+): Promise<ExplorerListResult> {
+  const resolved = await resolveInRoot(root, relPath, 'dir');
+  if ('error' in resolved) return resolved;
+  const abs = resolved.abs;
+  const rootAbs = path.resolve(root);
+  const rel = path.relative(rootAbs, abs);
 
   let dirents: fs.Dirent[];
   try {
