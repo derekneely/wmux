@@ -32,7 +32,7 @@ const READ_ERROR_CODES: Record<string, ExplorerErrorCode> = {
   unsupported_type: 'invalid_path',
   symlink: 'invalid_path',
   not_regular_file: 'invalid_path',
-  too_large: 'read_failed',
+  too_large: 'too_large',
   read_failed: 'read_failed',
 };
 
@@ -104,7 +104,15 @@ export function openInPreviewTab(
   // keep working with `{ keep }` alone.
   opts: { keep: boolean; surfaceId?: SurfaceId; relPath?: string },
 ): Promise<PreviewOpenFailure> {
-  const key = paneKey(workspaceId, paneId);
+  // Queued on the pane the open will actually LAND on, not the one the caller
+  // named. openOnce falls back to the workspace's first pane when the named one
+  // has closed, so two clicks naming two different dead panes both resolve onto
+  // one live pane — and keyed on the caller's id they would sit in two separate
+  // queues, run their "find the reusable preview" checks concurrently, and each
+  // create a preview tab. Two preview tabs in one pane is precisely what this
+  // file exists to prevent.
+  const targetPane = resolveTargetPane(workspaceId, paneId) ?? paneId;
+  const key = paneKey(workspaceId, targetPane);
   const prev = paneQueues.get(key);
   // When the queue is idle, start openOnce SYNCHRONOUSLY (not via .then()) —
   // it must run up through its own `readFile` call in the same tick as the
@@ -116,8 +124,15 @@ export function openInPreviewTab(
   // run the same callback): a previous open that threw must not swallow every
   // later open behind it, which is the same wedge the `clear` below guards
   // against on the map side.
+  // The RESOLVED pane is passed down, not re-derived inside openOnce. Resolving
+  // twice means resolving at two different moments: the key is computed when
+  // the click is queued, openOnce runs when its turn comes, and a pane that
+  // closes in between makes the two disagree. Then a newer click for the
+  // now-dead pane queues under the fallback pane and runs first, and the older
+  // click falls through onto that same pane afterwards and overwrites it. One
+  // resolution, one answer, carried.
   const next = (): Promise<PreviewOpenFailure> =>
-    openOnce(workspaceId, paneId, filePath, fileName, opts);
+    openOnce(workspaceId, targetPane, filePath, fileName, opts);
   const run = prev ? prev.then(next, next) : next();
   paneQueues.set(key, run);
   // Clear the entry once THIS call settles, but only if nothing newer has
@@ -135,6 +150,25 @@ function paneKey(workspaceId: WorkspaceId, paneId: PaneId): string {
   return `${workspaceId}:${paneId}`;
 }
 
+/**
+ * Which pane an open named for `paneId` will actually land on.
+ *
+ * The pane may have closed between the render and the click, and falling back
+ * to the workspace's first leaf beats dropping the click on the floor. Stated
+ * once, here, because the queue key is computed before openOnce runs and the
+ * two MUST agree about the answer — a queue keyed on a pane the work does not
+ * happen in serializes nothing.
+ *
+ * Null when the workspace is gone or has no panes at all; callers keep their
+ * own handling for that.
+ */
+function resolveTargetPane(workspaceId: WorkspaceId, paneId: PaneId): PaneId | null {
+  const workspace = useStore.getState().workspaces.find((w) => w.id === workspaceId);
+  if (!workspace) return null;
+  if (findLeaf(workspace.splitTree, paneId)) return paneId;
+  return getAllPaneIds(workspace.splitTree)[0] ?? null;
+}
+
 async function openOnce(
   workspaceId: WorkspaceId,
   paneId: PaneId,
@@ -148,15 +182,17 @@ async function openOnce(
 
   // The pane may have closed between the render and the click. Falling back to
   // the first leaf beats dropping the click on the floor.
-  let targetPane = paneId;
-  let leaf = findLeaf(workspace.splitTree, paneId);
-  if (!leaf) {
-    const first = getAllPaneIds(workspace.splitTree)[0];
-    if (!first) return null;
-    targetPane = first;
-    leaf = findLeaf(workspace.splitTree, first);
-    if (!leaf) return null;
-  }
+  // Already resolved by the caller, which keyed the queue on the answer — so
+  // there is no second resolution here, only a check that the answer still
+  // holds. A pane that died while this open sat in the queue makes the click
+  // STALE, and a stale click is dropped rather than redirected: redirecting it
+  // moves work onto a pane whose queue it was never in, where a newer click
+  // keyed to that pane may already have run, and the older open then overwrites
+  // the newer one. Falling back beats dropping a click only at enqueue time,
+  // where resolveTargetPane already does it and the key follows.
+  const targetPane = paneId;
+  const leaf = findLeaf(workspace.splitTree, targetPane);
+  if (!leaf) return null;
 
   const targetType = targetTypeFor(fileName);
   // A code read is addressed by (surfaceId, relPath) — main owns the root and
@@ -220,15 +256,43 @@ async function openOnce(
       : (READ_ERROR_CODES[read.code] ?? 'read_failed');
   }
 
+  // 2b. The dirty check above was made BEFORE the read, and the user had the
+  //     whole duration of that read to start typing into the very tab it is
+  //     about to overwrite. Re-read it from live state: a tab that went dirty
+  //     in the meantime gets the same treatment it would have got had it been
+  //     dirty all along — promoted out of preview, and left alone. The rule is
+  //     "an unsaved edit is not discarded by a click in a tree", and a race is
+  //     not an exception to it.
+  if (targetSurfaceId) {
+    const liveWs = useStore.getState().workspaces.find((w) => w.id === workspaceId);
+    const liveLeaf = liveWs ? findLeaf(liveWs.splitTree, targetPane) : null;
+    const live = liveLeaf?.surfaces.find((s) => s.id === targetSurfaceId);
+    if (!live) {
+      // Closed outright during the read. Falling through would address the
+      // update to an id no surface has any more — which a store `.map` silently
+      // no-ops, so the click would report success and put nothing on screen.
+      // Forgetting it here sends the open down the create-a-tab path instead.
+      targetSurfaceId = null;
+    } else if (live.markdownDirty) {
+      useStore.getState().updateSurface(workspaceId, targetPane, targetSurfaceId, { ephemeral: undefined });
+      targetSurfaceId = null;
+    }
+  }
+
   // 3. A reusable preview of the WRONG type cannot be updated in place; type is
   //    fixed at creation. Close it and add a replacement. This runs only AFTER
   //    the read succeeded, so a failed open never destroys the tab the user is
   //    looking at, and only under paneQueues' serialization, so two clicks
   //    cannot interleave a close with another open's add.
-  if (targetSurfaceId && preview && preview.type !== targetType) {
-    store.closeSurface(workspaceId, targetPane, preview.id);
-    targetSurfaceId = null;
-  }
+  //    ADD FIRST, then close. Closing the last surface in a pane IS a pane
+  //    close (surface-slice.ts's `newSurfaces.length === 0` branch), and for a
+  //    single-pane workspace closing that pane closes the WORKSPACE. So a user
+  //    who had closed their terminal, leaving a code preview alone in the pane,
+  //    lost the whole workspace by clicking a .md file in the tree that was
+  //    still on screen. Ordering it the other way round means the count never
+  //    reaches zero and the destructive branch is never entered.
+  const replacing = targetSurfaceId && preview && preview.type !== targetType ? preview.id : null;
+  if (replacing) targetSurfaceId = null;
 
   // 4. No reusable preview → make one.
   if (!targetSurfaceId) {
@@ -236,6 +300,7 @@ async function openOnce(
       ephemeral: !opts.keep,
     });
     if (!targetSurfaceId) return 'read_failed';
+    if (replacing) useStore.getState().closeSurface(workspaceId, targetPane, replacing);
   } else if (opts.keep) {
     store.updateSurface(workspaceId, targetPane, targetSurfaceId, { ephemeral: undefined });
   }

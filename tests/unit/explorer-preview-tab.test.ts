@@ -311,7 +311,7 @@ describe('openInPreviewTab — code files', () => {
 describe('openInPreviewTab — the root surface a code tab reloads from', () => {
   it('records codeRootSurfaceId, without which a restored tab cannot re-read', async () => {
     const { ws, pane } = setup();
-    await openInPreviewTab(ws, pane, 'C:\repo\index.ts', 'index.ts', {
+    await openInPreviewTab(ws, pane, 'C:\\repo\\index.ts', 'index.ts', {
       keep: true, surfaceId: 'surf-term' as any, relPath: 'index.ts',
     });
     const code = surfacesOf(ws).find((s) => s.type === 'code')!;
@@ -342,8 +342,8 @@ describe('openInPreviewTab — the staleness guard is per pane', () => {
       return { filePath, content: `# ${filePath}`, mtimeMs: 1 };
     });
 
-    const slowA = openInPreviewTab(ws, paneA, 'C:\repo\a.md', 'a.md', { keep: false });
-    await openInPreviewTab(ws, paneB, 'C:\repo\b.md', 'b.md', { keep: false });
+    const slowA = openInPreviewTab(ws, paneA, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    await openInPreviewTab(ws, paneB, 'C:\\repo\\b.md', 'b.md', { keep: false });
     releaseA();
 
     // null is SUCCESS here (PreviewOpenFailure), and the surface below is what
@@ -351,7 +351,7 @@ describe('openInPreviewTab — the staleness guard is per pane', () => {
     expect(await slowA).toBeNull();
     const leafA = (wsObj().splitTree as any).children[0];
     expect(leafA.surfaces.find((s: any) => s.type === 'markdown')?.markdownFilePath)
-      .toBe('C:\repo\a.md');
+      .toBe('C:\\repo\\a.md');
   });
 });
 
@@ -363,10 +363,124 @@ describe('openInPreviewTab — markdown never mints a save grant', () => {
     // on review: markdown-grants.ts says a renderer-supplied path is never a
     // grant source, and a jail is a smaller blast radius, not the user's
     // consent. Save As stays the consent step.
-    await openInPreviewTab(ws, pane, 'C:\repo\a.md', 'a.md', {
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', {
       keep: false, surfaceId: 'surf-term' as any, relPath: 'a.md',
     });
-    expect(readFile).toHaveBeenCalledWith('C:\repo\a.md');
+    expect(readFile).toHaveBeenCalledWith('C:\\repo\\a.md');
     expect((window as any).wmux.explorer).toBeUndefined();
+  });
+});
+
+// Both of these are races the pre-await snapshot could not see. They are
+// written against the real store, with only the IPC boundary faked, so a fix
+// that merely re-orders the synchronous part would not make them pass.
+describe('openInPreviewTab — races resolved after the read', () => {
+  it('does not overwrite a preview tab the user began editing DURING the read', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const first = surfacesOf(ws).find((s) => s.type === 'markdown');
+
+    // The user starts typing while the SECOND open's read is in flight.
+    readFile.mockImplementationOnce(async (filePath: string) => {
+      useStore.getState().updateSurface(ws, pane, first.id, { markdownDirty: true });
+      return { filePath, content: `# ${filePath}`, mtimeMs: 1 };
+    });
+    await openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false });
+
+    const md = surfacesOf(ws).filter((s) => s.type === 'markdown');
+    const edited = md.find((s) => s.id === first.id)!;
+    // The edit survives: still a.md, and promoted out of preview rather than recycled.
+    expect(edited.markdownFilePath).toBe('C:\\repo\\a.md');
+    expect(edited.ephemeral).toBeUndefined();
+    // b.md still opened — in its own tab, not on top of the unsaved edit.
+    expect(md).toHaveLength(2);
+    expect(md.some((s) => s.markdownFilePath === 'C:\\repo\\b.md')).toBe(true);
+  });
+
+  it('serializes two clicks that name different dead panes but land on the same live one', async () => {
+    const { ws, pane } = setup();
+    // Neither id exists, so both opens fall back to the workspace's only pane.
+    // Keyed on the CALLER's pane id these sit in two separate queues and run
+    // concurrently; keyed on the RESOLVED one they serialize. Either way the
+    // pane ends with a single preview tab, because `seqs` is keyed on the
+    // resolved pane too and drops the superseded open — which is why this is a
+    // guard on the invariant rather than a reproduction of a live bug.
+    const gate: Array<() => void> = [];
+    readFile.mockImplementation((filePath: string) =>
+      new Promise((resolve) => {
+        gate.push(() => resolve({ filePath, content: `# ${filePath}`, mtimeMs: 1 }));
+      }));
+
+    const a = openInPreviewTab(ws, 'pane-dead-a' as any, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const b = openInPreviewTab(ws, 'pane-dead-b' as any, 'C:\\repo\\b.md', 'b.md', { keep: false });
+    // Release reads as they arrive rather than all at once: when the two opens
+    // ARE serialized the second read does not exist yet, and a single drain
+    // would wait forever for it.
+    let settled = false;
+    void Promise.all([a, b]).then(() => { settled = true; });
+    for (let i = 0; i < 50 && !settled; i++) {
+      while (gate.length) gate.shift()!();
+      await Promise.resolve();
+    }
+    await Promise.all([a, b]);
+
+    // One preview tab, not two: the queue key is the pane the work lands on.
+    const md = surfacesOf(ws).filter((s) => s.type === 'markdown');
+    expect(md).toHaveLength(1);
+    expect(md[0].ephemeral).toBe(true);
+    expect(pane).toBeTruthy();
+  });
+
+  it('opens a fresh tab when the preview is closed DURING the read', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.md', 'a.md', { keep: false });
+    const first = surfacesOf(ws).find((s) => s.type === 'markdown')!;
+
+    // The tab this open was going to reuse is gone by the time the read lands.
+    readFile.mockImplementationOnce(async (filePath: string) => {
+      useStore.getState().closeSurface(ws, pane, first.id);
+      return { filePath, content: '# ' + filePath, mtimeMs: 1 };
+    });
+    await openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false });
+
+    // Addressing the update to the dead id would no-op silently and report
+    // success, leaving the click with nothing to show for it.
+    const md = surfacesOf(ws).filter((s) => s.type === 'markdown');
+    expect(md).toHaveLength(1);
+    expect(md[0].id).not.toBe(first.id);
+    expect(md[0].markdownFilePath).toBe('C:\\repo\\b.md');
+  });
+});
+
+describe('openInPreviewTab — tab lifecycle', () => {
+  it('does not destroy the pane when the SOLE preview changes type', async () => {
+    const { ws, pane } = setup();
+    // A code preview alone in the pane: the user closed the terminal after
+    // opening it, and the explorer tree is still on screen.
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.ts', 'a.ts', {
+      keep: false, surfaceId: 'surf-root' as any, relPath: 'a.ts',
+    });
+    const before = surfacesOf(ws);
+    for (const s of before) {
+      if (s.type !== 'code') useStore.getState().closeSurface(ws, pane, s.id);
+    }
+    expect(surfacesOf(ws).filter((s) => s.type === 'code')).toHaveLength(1);
+
+    // Clicking a .md needs a DIFFERENT surface type, so the code preview is
+    // replaced. Closing it first would take the last-tab path and close the
+    // pane — and with it, a single-pane workspace.
+    await openInPreviewTab(ws, pane, 'C:\\repo\\b.md', 'b.md', { keep: false });
+
+    expect(useStore.getState().workspaces.some((w) => w.id === ws)).toBe(true);
+    const after = surfacesOf(ws);
+    expect(after.filter((s) => s.type === 'markdown')).toHaveLength(1);
+    expect(after.filter((s) => s.type === 'code')).toHaveLength(0);
+  });
+
+  it('reports an oversized markdown file as too_large, not read_failed', async () => {
+    const { ws, pane } = setup();
+    readFile.mockImplementationOnce(async () => ({ error: 'too big', code: 'too_large' }));
+    const failure = await openInPreviewTab(ws, pane, 'C:\\repo\\huge.md', 'huge.md', { keep: false });
+    expect(failure).toBe('too_large');
   });
 });
