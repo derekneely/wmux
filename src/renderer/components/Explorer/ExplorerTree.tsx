@@ -7,7 +7,8 @@ interface ExplorerTreeProps {
   selectedRelPath: string | null;
   onToggleDir: (relPath: string) => void;
   onSelect: (row: ExplorerRow) => void;
-  /** Task 7 wires the open flow here; Task 6 passes a no-op. */
+  /** Open a file: `keep` distinguishes a promoting gesture (double-click,
+   *  Ctrl+click) from a plain preview click. */
   onActivate: (row: ExplorerRow, opts: { keep: boolean }) => void;
   onContextMenu: (row: ExplorerRow, event: React.MouseEvent) => void;
 }

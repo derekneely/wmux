@@ -78,7 +78,19 @@ export type PreviewOpenFailure = ExplorerErrorCode | null;
 //   from overlapping, but `seq` is kept as an independent second guard —
 //   cheap insurance against a future caller that reaches `openOnce` outside
 //   the queue (a keyboard handler, a test) reintroducing the race.
-let seq = 0;
+//
+// Both are keyed PER PANE, and the seq must be: a single module-level counter
+// made an open in pane B supersede an in-flight open in pane A, which then
+// returned `null` — reported as success — and left pane A's preview showing
+// the previous file. Two panes' previews are independent tabs and neither can
+// stand in for the other, so nothing about an open in one says anything about
+// an open in the other.
+//
+// Unlike paneQueues this is not cleared when a pane goes idle: the counter has
+// to keep rising across bursts or a later open could reuse a number an
+// in-flight one is still holding. It is one integer per pane ever previewed
+// into, which is bounded by the panes the user actually opens files in.
+const seqs = new Map<string, number>();
 const paneQueues = new Map<string, Promise<PreviewOpenFailure>>();
 
 export function openInPreviewTab(
@@ -92,7 +104,7 @@ export function openInPreviewTab(
   // keep working with `{ keep }` alone.
   opts: { keep: boolean; surfaceId?: SurfaceId; relPath?: string },
 ): Promise<PreviewOpenFailure> {
-  const key = `${workspaceId}:${paneId}`;
+  const key = paneKey(workspaceId, paneId);
   const prev = paneQueues.get(key);
   // When the queue is idle, start openOnce SYNCHRONOUSLY (not via .then()) —
   // it must run up through its own `readFile` call in the same tick as the
@@ -116,6 +128,11 @@ export function openInPreviewTab(
   const clear = () => { if (paneQueues.get(key) === run) paneQueues.delete(key); };
   run.then(clear, clear);
   return run;
+}
+
+/** The queue and seq key. `paneId` alone would collide across workspaces. */
+function paneKey(workspaceId: WorkspaceId, paneId: PaneId): string {
+  return `${workspaceId}:${paneId}`;
 }
 
 async function openOnce(
@@ -174,11 +191,22 @@ async function openOnce(
     store.updateSurface(workspaceId, targetPane, preview.id, { ephemeral: undefined });
   }
 
-  const mine = ++seq;
+  // Per TARGET pane, not per requested pane: the fallback above can redirect
+  // two clicks onto one pane, and it is the pane whose preview tab is being
+  // rewritten that decides whether an in-flight read is still wanted.
+  const seqKey = paneKey(workspaceId, targetPane);
+  const mine = (seqs.get(seqKey) ?? 0) + 1;
+  seqs.set(seqKey, mine);
+  // A markdown file goes through the ordinary, UNJAILED markdown read, and a
+  // .md opened from the tree is therefore read-only until the user picks a
+  // destination in Save As. That is markdown-grants.ts's rule, not an oversight
+  // here: a renderer-supplied path never mints a save grant, and a jail is a
+  // smaller blast radius rather than the user's consent. See the note where
+  // that handler would have gone in ipc-handlers.ts.
   const read = targetType === 'code'
     ? await window.wmux.code.readFile(opts.surfaceId!, opts.relPath!)
     : await window.wmux.markdown.readFile(filePath);
-  if (mine !== seq) return null; // a newer open landed while this one was in flight
+  if (seqs.get(seqKey) !== mine) return null; // a newer open landed while this one was in flight
   // No empty tab is left behind on failure — but the failure is REPORTED, not
   // swallowed. Silence here is what made a wrong absolute path look like a
   // dead click with no explanation, and it hides every click on a file that
@@ -218,7 +246,10 @@ async function openOnce(
       codeFilePath: read.filePath,
       codeFileName: fileName,
       codeRelPath: opts.relPath,
-      codeFileMtime: read.mtimeMs,
+      // Persisted, and what lets the tab refill itself after a restart: main
+      // will only read for a live terminal it owns, so the code surface's own
+      // id is unusable — see SurfaceRef.codeRootSurfaceId.
+      codeRootSurfaceId: opts.surfaceId,
     });
   } else {
     // fileName is REQUIRED: without it markdownFileName is not updated and the

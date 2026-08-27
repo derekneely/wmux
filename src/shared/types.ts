@@ -93,7 +93,7 @@ export interface SurfaceRef {
    *  survives a restart — and comes back still marked unsaved. */
   markdownDirty?: boolean;
 
-  // ─── Code viewer surface (docs/local/specs/2026-08-26-code-viewer-design.md)
+  // ─── Code viewer surface ───────────────────────────────────────────────────
   // A read-only text view of a file the explorer opened. Deliberately its OWN
   // type rather than a flag on `markdown`: a .rs file in a surface labelled
   // markdown lies to `wmux markdown get`, to the tab icon, and to session
@@ -111,8 +111,17 @@ export interface SurfaceRef {
    *  would mean re-deriving the root in the renderer, which is exactly what the
    *  jail exists to prevent. */
   codeRelPath?: string;
-  /** mtime at the last successful read, so a reload can notice a rewrite. */
-  codeFileMtime?: number;
+  /**
+   * The TERMINAL surface whose explorer root this file was read under.
+   *
+   * Persisted, and the reason a restored code tab can refill itself: main
+   * addresses a code read by (surfaceId, relPath) where the surfaceId must be
+   * a live, owned terminal — the code surface's OWN id has no PTY and no
+   * reported cwd, so reading with it always answers `no_root`. Surface ids
+   * survive a restore verbatim (replaceAllWorkspaces takes the saved splitTree
+   * as-is), so the terminal this points at is the same one after a restart.
+   */
+  codeRootSurfaceId?: SurfaceId;
   /**
    * The file's text. In-store only — STRIPPED by dropCodeContent before any
    * persistence, unlike markdownContent which is deliberately persisted.
@@ -133,7 +142,7 @@ export interface SurfaceRef {
   ephemeral?: boolean;
 }
 
-// ─── File explorer (docs/local/specs/2026-08-25-file-explorer-design.md) ─────
+// ─── File explorer ───────────────────────────────────────────────────────────
 // Directory ENUMERATION was the original capability here. MARKDOWN reads still
 // go through markdown.readFile, which is unjailed by deliberate existing
 // design; CODE reads go through code:read-file, which is jailed to the same
@@ -141,6 +150,13 @@ export interface SurfaceRef {
 // are inverses of each other, and neither widens the other. Either way the
 // renderer supplies no filesystem path at any point — only a surfaceId and a
 // relative path, both of which main validates.
+
+/**
+ * Per-directory enumeration cap. Declared here rather than in explorer-fs.ts
+ * because the renderer's "showing the first N entries" banner has to state the
+ * same number, and a renderer may not import from src/main/.
+ */
+export const EXPLORER_MAX_ENTRIES = 2000;
 
 export interface ExplorerEntry {
   name: string;
@@ -183,6 +199,7 @@ export type ExplorerErrorCode =
   | 'not_found'
   | 'not_a_directory'
   | 'binary'          // deny-listed extension, or the content sniff rejected it
+  | 'executable'      // a shell action refused to launch a program or script
   | 'too_large'       // exceeds MAX_CODE_BYTES
   | 'denied'          // EACCES/EPERM
   | 'read_failed';
@@ -639,6 +656,11 @@ export const IPC_CHANNELS = {
   EXPLORER_LIST_DIR: 'explorer:list-dir',
   // Code viewer: read one text file, jailed to the same root list-dir uses.
   CODE_READ_FILE: 'code:read-file',
+  // Shell actions on a listed entry, jailed the same way. Their own channels
+  // rather than the markdown ones, whose extension whitelist silently rejects
+  // every ordinary source file the tree now offers.
+  EXPLORER_REVEAL: 'explorer:reveal',
+  EXPLORER_OPEN_IN_APP: 'explorer:open-in-app',
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',

@@ -345,9 +345,12 @@ export const fr: Translation = {
   'explorer.error.not_found': 'Dossier introuvable',
   'explorer.error.not_a_directory': "Ce n'est pas un dossier",
   'explorer.error.binary': "Ce fichier n'est pas du texte",
+  'explorer.error.executable': 'wmux ne lance pas de programmes ni de scripts',
   'explorer.error.too_large': 'Ce fichier est trop volumineux pour être affiché',
   'explorer.error.denied': 'Permission refusée',
   'explorer.error.read_failed': 'Impossible de lire le dossier',
+  'code.error.not_found': 'Fichier introuvable',
+  'code.error.read_failed': 'Impossible de lire ce fichier',
   // Paramètres — Panneau des profils de lancement rapide
   'settings.quickLaunch.title': 'Profils de lancement rapide',
   'settings.quickLaunch.hintPart1': "Préréglages d'onglet en un clic affichés dans le menu ",

@@ -237,3 +237,44 @@ describe('listDir filtering, limits and errors', () => {
     }
   });
 });
+
+// ─── Shell-action deny-list ──────────────────────────────────────────────────
+// The one list in this module that IS a security boundary rather than a UX
+// filter: `shell.openPath` on these RUNS them, and the jail bounds only which
+// file can be named, not what Windows does once it opens it.
+
+describe('isExecutablePath', () => {
+  it('refuses programs, installers and script hosts', async () => {
+    const { isExecutablePath } = await import('../../src/main/explorer-fs');
+    for (const name of ['setup.exe', 'a.BAT', 'deploy.ps1', 'x.cmd', 'evil.vbs',
+                        'run.js', 'thing.hta', 'add.reg', 'shortcut.lnk', 'app.msi']) {
+      expect(isExecutablePath(name), name).toBe(true);
+    }
+  });
+
+  it('refuses scripts whose association is an interpreter on a dev machine', async () => {
+    const { isExecutablePath } = await import('../../src/main/explorer-fs');
+    // A .py opens an editor on one machine and RUNS on the next, depending only
+    // on what the Python installer did to HKCR. A guard whose outcome depends on
+    // the victim's file associations is not a guard.
+    for (const name of ['build.py', 'gui.pyw', 'task.rb', 'old.pl', 'index.php',
+                        'init.lua', 'macro.ahk', 'setup.sh', 'run.bash']) {
+      expect(isExecutablePath(name), name).toBe(true);
+    }
+  });
+
+  it('allows ordinary source and data files', async () => {
+    const { isExecutablePath } = await import('../../src/main/explorer-fs');
+    for (const name of ['index.ts', 'main.rs', 'App.tsx', 'README.md', 'data.json',
+                        'logo.png', 'report.pdf', 'Makefile', '.gitignore', 'notes.txt']) {
+      expect(isExecutablePath(name), name).toBe(false);
+    }
+  });
+
+  it('is case-insensitive and extension-anchored, not a substring match', async () => {
+    const { isExecutablePath } = await import('../../src/main/explorer-fs');
+    expect(isExecutablePath('Setup.EXE')).toBe(true);
+    expect(isExecutablePath('exe-notes.md')).toBe(false);
+    expect(isExecutablePath('')).toBe(false);
+  });
+});

@@ -14,32 +14,82 @@
 // standing in for one. That is why the jail is exported rather than inlined in
 // listDir — see its own header.
 //
-// TOCTOU is accepted, not solved. Between the segment walk and the readdir a
+// TOCTOU is accepted, not solved. Between the segment walk and the readdir —
+// or, for a code read, between the walk and the open in code-file.ts — a
 // segment could be swapped for a link. Closing that needs handle-based
-// traversal (openat-style), which Node does not expose portably. The residual
-// capability is "enumerate a directory outside the root", by an attacker who
-// already has local write access to the project root — and who could just put
-// a .md file there instead.
+// traversal (openat-style), which Node does not expose portably.
+//
+// State the residual capability at its widest, which is the CODE read and not
+// the enumeration: "read one text file from outside the root", by an attacker
+// who already has write access inside the project root and can win the race.
+// Such an attacker can already drop a symlink-free file of their choosing into
+// the root and have the user open it, so this buys them ordering, not reach —
+// but it is a file read, not a directory listing, and the note used to say the
+// smaller of the two.
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type {
-  ExplorerEntry,
-  ExplorerListError,
-  ExplorerListResult,
+import {
+  EXPLORER_MAX_ENTRIES,
+  type ExplorerEntry,
+  type ExplorerListError,
+  type ExplorerListResult,
 } from '../shared/types';
 import { isBinaryPath } from './code-file';
 import { canonical } from './markdown-grants';
 
 /** Per-directory cap. Exceeding it sets `truncated` rather than shipping a
- *  50k-element array through IPC. */
-export const MAX_ENTRIES = 2000;
+ *  50k-element array through IPC. Re-exported from shared/types.ts, which is
+ *  where it has to live for the renderer's "first N entries" banner to quote
+ *  the same number. */
+export const MAX_ENTRIES = EXPLORER_MAX_ENTRIES;
 
 /** Static skip list. Deliberately not .gitignore parsing — a tree that needs a
  *  parser to decide what to show is a different feature. */
 export const FILTERED_NAMES = new Set(['.git', 'node_modules', 'dist', 'build']);
 
 const RESERVED_STEM = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+/**
+ * Extensions `explorer:open-in-app` refuses to hand to the shell.
+ *
+ * Unlike BINARY_EXT in code-file.ts, this one IS a security boundary rather
+ * than a UX filter. "Open in the default app" is `shell.openPath`, and for
+ * these the default app is the thing itself, or an interpreter: opening them
+ * is RUNNING them. The jail bounds WHICH file a compromised renderer can name,
+ * not what happens once Windows opens it, so the jail alone would turn a
+ * right-click into arbitrary code execution with whatever a repo checked in.
+ *
+ * Reveal is deliberately NOT gated on this — showItemInFolder only selects the
+ * item in Explorer and executes nothing.
+ *
+ * A DENY-list and not an allow-list, deliberately. "Open in the default app" is
+ * most useful for exactly the files wmux cannot render itself — a PDF, a
+ * spreadsheet, an image — and that set is open-ended, so an allow-list would
+ * re-create the over-restriction this action was just fixed for.
+ *
+ * The second group is the one that is easy to miss: source files whose
+ * extension is commonly REGISTERED to an interpreter. A .py opens in an editor
+ * on one machine and runs on the next, depending only on what the Python
+ * installer did to HKCR — and a guard whose outcome depends on the victim's
+ * file associations is not a guard. They are refused, and the cost is small:
+ * single-click already views them in the pane, and reveal still works.
+ */
+export const EXEC_EXT: ReadonlySet<string> = new Set([
+  // Programs, installers, shortcuts and Windows script hosts.
+  '.exe', '.com', '.scr', '.msi', '.msp', '.cpl', '.dll',
+  '.bat', '.cmd', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh',
+  '.hta', '.reg', '.lnk', '.pif', '.url', '.scf', '.jar', '.msc',
+  // Scripts whose association is an interpreter on a developer's machine.
+  '.py', '.pyw', '.rb', '.pl', '.php', '.lua', '.tcl', '.ahk',
+  '.sh', '.bash', '.zsh', '.fish',
+]);
+
+/** True when the shell must not be asked to open this name. */
+export function isExecutablePath(name: string): boolean {
+  if (!name) return false;
+  return EXEC_EXT.has(path.extname(name).toLowerCase());
+}
 
 function fail(message: string, code: ExplorerListError['code']): ExplorerListError {
   return { error: message, code };
@@ -103,15 +153,17 @@ function toPosix(p: string): string {
  *
  * Extracted out of listDir so directory enumeration and file reading cannot
  * drift apart — a second copy of a segment walk is exactly the duplication
- * this module's header refuses. `leaf` is the ONLY difference between the two
+ * this module's header refuses. `leaf` is the ONLY difference between the
  * callers: listDir needs the final segment to be a directory, a code read
- * needs it to be a regular file. Every INTERMEDIATE segment is a directory
- * either way, and no segment may be a symlink.
+ * needs it to be a regular file, and a shell action (reveal / open-in-app)
+ * takes either, since revealing a folder is as reasonable as revealing a file.
+ * Every INTERMEDIATE segment is a directory in all three cases, and no segment
+ * may be a symlink.
  */
 export async function resolveInRoot(
   root: string,
   relPath: string,
-  leaf: 'dir' | 'file',
+  leaf: 'dir' | 'file' | 'any',
 ): Promise<{ abs: string } | ExplorerListError> {
   const invalid = validateRelPath(relPath);
   if (invalid) return fail('Invalid path', invalid);
@@ -168,6 +220,13 @@ export async function resolveInRoot(
     const isLast = i === segments.length - 1;
     if (!isLast || leaf === 'dir') {
       if (!st.isDirectory()) return fail('Not a directory', 'not_a_directory');
+    } else if (leaf === 'any') {
+      // A shell action takes a file or a directory, but still nothing else —
+      // a device or a socket reaching shell.openPath is not a thing to allow
+      // just because the two named kinds were not required.
+      if (!st.isFile() && !st.isDirectory()) {
+        return fail('Not a regular file', 'invalid_path');
+      }
     } else if (!st.isFile()) {
       // A directory where a file was expected. Reusing invalid_path rather
       // than inventing a third code: the user clicked something the tree

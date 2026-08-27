@@ -914,15 +914,16 @@ export default function App() {
   });
 
   // Open/closed is per-workspace and persisted, so the toggle writes both.
+  // The store write is deliberately OUTSIDE the setState updater: an updater
+  // must be pure, and StrictMode double-invokes it — which made one toggle
+  // write the workspace twice.
   const handleToggleExplorer = useCallback((next?: boolean) => {
-    setExplorerOpen((prev) => {
-      const value = next ?? !prev;
-      if (activeWorkspaceId) {
-        updateWorkspaceMetadata(activeWorkspaceId, { explorerOpen: value });
-      }
-      return value;
-    });
-  }, [activeWorkspaceId, updateWorkspaceMetadata]);
+    const value = next ?? !explorerOpen;
+    setExplorerOpen(value);
+    if (activeWorkspaceId) {
+      updateWorkspaceMetadata(activeWorkspaceId, { explorerOpen: value });
+    }
+  }, [explorerOpen, activeWorkspaceId, updateWorkspaceMetadata]);
 
   // Restore per-workspace on switch. Deps include explorerOpen itself, not just
   // the id: session restore can set activeWorkspaceId before (or in a separate

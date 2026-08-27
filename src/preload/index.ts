@@ -315,6 +315,13 @@ contextBridge.exposeInMainWorld('wmux', {
     // a jail, since a compromised renderer would simply pass 'C:\\'.
     listDir: (surfaceId: string, relPath: string, opts?: { showHidden?: boolean }) =>
       ipcRenderer.invoke(IPC_CHANNELS.EXPLORER_LIST_DIR, surfaceId, relPath, opts),
+    // Shell actions on a listed entry. Not the `markdown.*` pair: those are
+    // gated on the markdown extension whitelist and silently reject every
+    // ordinary source file the tree offers.
+    reveal: (surfaceId: string, relPath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXPLORER_REVEAL, surfaceId, relPath),
+    openInApp: (surfaceId: string, relPath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.EXPLORER_OPEN_IN_APP, surfaceId, relPath),
   },
   code: {
     // Same rule as `explorer` above: a surfaceId and a RELATIVE path, never an

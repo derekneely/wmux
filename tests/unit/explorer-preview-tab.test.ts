@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useStore } from '../../src/renderer/store';
 import { openInPreviewTab } from '../../src/renderer/components/Explorer/open-preview';
+import { splitNode } from '../../src/renderer/store/split-utils';
 
 const readFile = vi.fn();
 (globalThis as any).window = (globalThis as any).window ?? {};
@@ -302,5 +303,70 @@ describe('openInPreviewTab — code files', () => {
     ]);
     const previews = surfacesOf(ws).filter((s) => s.type === 'markdown' || s.type === 'code');
     expect(previews).toHaveLength(1);
+  });
+});
+
+// ─── Regressions found in review ─────────────────────────────────────────────
+
+describe('openInPreviewTab — the root surface a code tab reloads from', () => {
+  it('records codeRootSurfaceId, without which a restored tab cannot re-read', async () => {
+    const { ws, pane } = setup();
+    await openInPreviewTab(ws, pane, 'C:\repo\index.ts', 'index.ts', {
+      keep: true, surfaceId: 'surf-term' as any, relPath: 'index.ts',
+    });
+    const code = surfacesOf(ws).find((s) => s.type === 'code')!;
+    // The TERMINAL's id, never the code surface's own — main only reads for a
+    // live, owned terminal, so its own id would answer no_root forever.
+    expect(code.codeRootSurfaceId).toBe('surf-term');
+    expect(code.codeRootSurfaceId).not.toBe(code.id);
+  });
+});
+
+describe('openInPreviewTab — the staleness guard is per pane', () => {
+  it('does not let an open in one pane cancel an in-flight open in another', async () => {
+    const { ws, pane } = setup();
+    // Two panes, two independent preview tabs. A single module-level seq made
+    // the slower pane's open return null — reported as SUCCESS — and leave its
+    // preview showing the previous file.
+    const wsObj = () => useStore.getState().workspaces.find((w) => w.id === ws)!;
+    useStore.getState().updateSplitTree(
+      ws, splitNode(wsObj().splitTree, pane, 'pane-second' as any, 'terminal', 'horizontal'),
+    );
+    const tree: any = wsObj().splitTree;
+    const paneA = tree.children[0].paneId;
+    const paneB = tree.children[1].paneId;
+
+    let releaseA!: () => void;
+    readFile.mockImplementation(async (filePath: string) => {
+      if (filePath.endsWith('a.md')) await new Promise<void>((r) => { releaseA = r; });
+      return { filePath, content: `# ${filePath}`, mtimeMs: 1 };
+    });
+
+    const slowA = openInPreviewTab(ws, paneA, 'C:\repo\a.md', 'a.md', { keep: false });
+    await openInPreviewTab(ws, paneB, 'C:\repo\b.md', 'b.md', { keep: false });
+    releaseA();
+
+    // null is SUCCESS here (PreviewOpenFailure), and the surface below is what
+    // separates a real success from the bug's silent "superseded" null.
+    expect(await slowA).toBeNull();
+    const leafA = (wsObj().splitTree as any).children[0];
+    expect(leafA.surfaces.find((s: any) => s.type === 'markdown')?.markdownFilePath)
+      .toBe('C:\repo\a.md');
+  });
+});
+
+describe('openInPreviewTab — markdown never mints a save grant', () => {
+  it('always reads a .md through the unjailed markdown.readFile', async () => {
+    const { ws, pane } = setup();
+    // Even with a surfaceId and relPath in hand — the panel always has both.
+    // A jailed explorer read that recorded a grant was written here and removed
+    // on review: markdown-grants.ts says a renderer-supplied path is never a
+    // grant source, and a jail is a smaller blast radius, not the user's
+    // consent. Save As stays the consent step.
+    await openInPreviewTab(ws, pane, 'C:\repo\a.md', 'a.md', {
+      keep: false, surfaceId: 'surf-term' as any, relPath: 'a.md',
+    });
+    expect(readFile).toHaveBeenCalledWith('C:\repo\a.md');
+    expect((window as any).wmux.explorer).toBeUndefined();
   });
 });

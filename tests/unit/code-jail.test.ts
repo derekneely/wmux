@@ -72,3 +72,35 @@ describe('resolveInRoot', () => {
     expect(code(await resolveInRoot(root, 'src/nope.ts', 'file'))).toBe('not_found');
   });
 });
+
+// ─── leaf='any': the shell actions ───────────────────────────────────────────
+// Reveal and open-in-app take a file OR a folder, which is the whole reason
+// this third mode exists: gating them on the markdown extension whitelist made
+// both silent no-ops for every ordinary source file the tree lists.
+
+describe("resolveInRoot leaf='any'", () => {
+  it('accepts a file', async () => {
+    const r: any = await resolveInRoot(root, 'src/index.ts', 'any');
+    expect(r.abs).toBe(path.join(root, 'src', 'index.ts'));
+  });
+
+  it('accepts a directory, which leaf=file refuses', async () => {
+    const r: any = await resolveInRoot(root, 'src', 'any');
+    expect(r.abs).toBe(path.join(root, 'src'));
+    expect(code(await resolveInRoot(root, 'src', 'file'))).toBe('invalid_path');
+  });
+
+  it('accepts the root itself — revealing the pane folder is legitimate', async () => {
+    const r: any = await resolveInRoot(root, '', 'any');
+    expect(r.abs).toBe(path.resolve(root));
+  });
+
+  it('still refuses an escape', async () => {
+    expect(code(await resolveInRoot(root, '../outside/secret.txt', 'any'))).toBe('outside_root');
+  });
+
+  it('still refuses the Windows path policy', async () => {
+    expect(code(await resolveInRoot(root, 'C:\Windows', 'any'))).toBe('invalid_path');
+    expect(code(await resolveInRoot(root, 'notes.txt:hidden', 'any'))).toBe('invalid_path');
+  });
+});

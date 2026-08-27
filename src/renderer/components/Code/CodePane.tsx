@@ -1,4 +1,4 @@
-// ─── Code viewer pane (docs/local/specs/2026-08-26-code-viewer-design.md) ────
+// ─── Code viewer pane ────────────────────────────────────────────────────────
 // Read-only by construction: there is no editor here and no view-mode toggle,
 // so "read-only" is a property of this component's shape rather than a flag
 // some future feature has to remember to honour.
@@ -10,25 +10,13 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
-import { useT, type TranslationKey } from '../../i18n';
+import { useT } from '../../i18n';
 import { SOURCE_VIRTUALIZE_THRESHOLD } from '../Markdown/markdown-utils';
+import { codeErrorKey } from '../Explorer/explorer-errors';
 import type {
   ExplorerErrorCode, PaneId, SplitNode, SurfaceId, SurfaceRef, WorkspaceId,
 } from '../../../shared/types';
 import '../../styles/code.css';
-
-const ERROR_KEY: Record<ExplorerErrorCode, TranslationKey> = {
-  no_root: 'explorer.error.no_root',
-  remote: 'explorer.error.remote',
-  invalid_path: 'explorer.error.invalid_path',
-  outside_root: 'explorer.error.outside_root',
-  not_found: 'explorer.error.not_found',
-  not_a_directory: 'explorer.error.not_a_directory',
-  binary: 'explorer.error.binary',
-  too_large: 'explorer.error.too_large',
-  denied: 'explorer.error.denied',
-  read_failed: 'explorer.error.read_failed',
-};
 
 export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Element | null {
   const t = useT();
@@ -46,6 +34,28 @@ export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Ele
   const updateSurface = useStore((s) => s.updateSurface);
 
   const relPath = surface?.codeRelPath ?? null;
+  // The TERMINAL whose root this file lives under — never this surface's own
+  // id. Main reads only for a live, owned terminal surface, and a code surface
+  // has neither a PTY nor a reported cwd, so reading with `surfaceId` here
+  // answered `no_root` every time and every restored tab came back blank.
+  const rootSurfaceId = surface?.codeRootSurfaceId ?? null;
+  // Whether main can be expected to HAVE a root for that terminal yet.
+  //
+  // The explorer root map in main is fed by report_pwd, i.e. by the shell's
+  // first prompt — and on a restore this pane mounts long before a freshly
+  // spawned shell gets there. Reading immediately answers `no_root`, and the
+  // effect below has no retry, so the tab would sit on an error forever for
+  // no reason other than being early. `currentCwd` is set from that same
+  // report, so it IS the readiness signal: absent, wait; present, read. The
+  // effect re-runs on its own when it lands.
+  const rootCwd = useStore((s) => {
+    if (!rootSurfaceId) return null;
+    for (const ws of s.workspaces) {
+      const found = findSurface(ws.splitTree, rootSurfaceId);
+      if (found) return found.currentCwd ?? null;
+    }
+    return null;
+  });
   const filePath = surface?.codeFilePath ?? '';
   const content = surface?.codeContent;
   const [error, setError] = useState<ExplorerErrorCode | null>(null);
@@ -58,33 +68,44 @@ export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Ele
   // stale ghost of itself.
   useEffect(() => {
     if (content !== undefined) return;      // already loaded this session
-    if (!relPath) { setError('invalid_path'); return; }
+    if (!relPath || !rootSurfaceId) { setError('invalid_path'); return; }
+    if (!rootCwd) return;                   // root not reported yet — see above
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void window.wmux.code.readFile(surfaceId, relPath).then(
+    void window.wmux.code.readFile(rootSurfaceId, relPath).then(
       (res: any) => {
         if (cancelled) return;
         setLoading(false);
         if (!res) { setError('read_failed'); return; }
         if ('error' in res) { setError(res.code as ExplorerErrorCode); return; }
-        updateSurfaceContent(res.content, res.mtimeMs);
+        // The relPath is resolved under the terminal's root AS IT IS NOW, and
+        // that root moves: the shell may have cd'd since this tab was opened,
+        // or been restored somewhere else. Then the same relPath names a
+        // DIFFERENT file, and the pane would show it under the old tab label
+        // and the old path in its toolbar. Compare against the absolute path
+        // this surface was opened with and refuse the mismatch — a tab whose
+        // file is no longer reachable is `not_found`, not silently something
+        // else. Case-insensitive: Windows spells one file many ways.
+        if (filePath && !samePath(res.filePath, filePath)) {
+          setError('not_found');
+          return;
+        }
+        updateSurfaceContent(res.content);
       },
       () => { if (!cancelled) { setLoading(false); setError('read_failed'); } },
     );
     return () => { cancelled = true; };
 
-    function updateSurfaceContent(text: string, mtimeMs: number) {
+    function updateSurfaceContent(text: string) {
       // Re-resolved from the LIVE state rather than closed over: the surface
       // may have been dragged to another pane while the read was in flight,
       // and updateSurface addresses a surface by (workspace, pane, surface).
       const owner = findOwner(useStore.getState().workspaces, surfaceId);
       if (!owner) return;
-      updateSurface(owner.workspaceId, owner.paneId, surfaceId, {
-        codeContent: text, codeFileMtime: mtimeMs,
-      });
+      updateSurface(owner.workspaceId, owner.paneId, surfaceId, { codeContent: text });
     }
-  }, [surfaceId, relPath, content, updateSurface]);
+  }, [surfaceId, rootSurfaceId, rootCwd, relPath, filePath, content, updateSurface]);
 
   const lines = useMemo(() => (content ?? '').split('\n'), [content]);
 
@@ -96,7 +117,7 @@ export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Ele
     return (
       <div className="code-pane">
         <div className="code-pane__status code-pane__status--error">
-          {t(ERROR_KEY[error], 'Could not read that file')}
+          {t(codeErrorKey(error), 'Could not read that file')}
         </div>
       </div>
     );
@@ -139,6 +160,17 @@ export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Ele
       </div>
     </div>
   );
+}
+
+/**
+ * Windows spells one file many ways — casing, and separators the two sides of
+ * this comparison did not necessarily build the same way. Neither side is a
+ * security decision here: this is an integrity check on a path main itself
+ * returned, so a normalizing compare is exactly right.
+ */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => p.split(/[\\/]+/).filter(Boolean).join('\\').toLowerCase();
+  return norm(a) === norm(b);
 }
 
 // ─── Tree lookups ────────────────────────────────────────────────────────────

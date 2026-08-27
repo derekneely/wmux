@@ -2,11 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../../store';
 import { findLeaf } from '../../store/split-utils';
 import { useT } from '../../i18n';
-import type { ExplorerErrorCode, ExplorerListResult } from '../../../shared/types';
+import {
+  EXPLORER_MAX_ENTRIES,
+  type ExplorerErrorCode, type ExplorerListResult,
+} from '../../../shared/types';
 import {
   flattenVisible, pathRoot, pickRootSurface, pruneExpanded, responseKey, toAbsolutePath, toggleExpanded,
   type ExplorerRow, type ExplorerTreeState,
 } from './explorer-state';
+import { explorerErrorKey } from './explorer-errors';
 import { ExplorerTree } from './ExplorerTree';
 import { openInPreviewTab } from './open-preview';
 import '../../styles/explorer.css';
@@ -46,15 +50,26 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
     );
   }, [workspace, focusedPaneId]);
 
-  if (focusedPaneId && focusedSurface) lastTerminalByPane.current.set(focusedPaneId, focusedSurface.id);
-
   // A pane with no terminal at all (a markdown- or browser-only pane) has no
   // root to offer. Holding the last good one beats blanking the panel: the
   // user's browsing context survives a detour into such a pane.
+  //
+  // Both of these are refs read during THIS render and written after it: the
+  // sticky value has to be usable on the same render that loses the terminal,
+  // so the read cannot wait for an effect — but the write must, or the render
+  // is impure and StrictMode's double-invoke records a pane visit twice.
   const stickyRef = useRef<{ surfaceId: string; root: string } | null>(null);
   const liveRoot = focusedSurface?.currentCwd ?? focusedSurface?.cwd ?? '';
-  if (focusedSurface && liveRoot) stickyRef.current = { surfaceId: focusedSurface.id, root: liveRoot };
   const sticky = stickyRef.current;
+
+  useEffect(() => {
+    if (focusedPaneId && focusedSurface) {
+      lastTerminalByPane.current.set(focusedPaneId, focusedSurface.id);
+    }
+    if (focusedSurface && liveRoot) {
+      stickyRef.current = { surfaceId: focusedSurface.id, root: liveRoot };
+    }
+  }, [focusedPaneId, focusedSurface, liveRoot]);
 
   const surfaceId = (focusedSurface && liveRoot ? focusedSurface.id : sticky?.surfaceId) ?? null;
   // The cwd as REPORTED by the shell. Good enough to identify a fetch, and it
@@ -207,6 +222,27 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
     void window.wmux?.clipboard?.writeText?.(absolutePathOf(relPath));
   }, [absolutePathOf]);
 
+  // Reveal / open-in-app go through the EXPLORER's own jailed channels, not
+  // `markdown.*`: those are gated main-side on the markdown extension
+  // whitelist, so every ordinary source file the tree offers came back
+  // `unsupported_type` and the click did nothing at all. Main answers in
+  // ExplorerErrorCode, and a refusal is shown under the tree rather than
+  // discarded — a silently dropped shell action is indistinguishable from a
+  // dead menu item.
+  const runShellAction = useCallback((
+    action: 'reveal' | 'openInApp',
+    relPath: string,
+  ) => {
+    if (!surfaceId) { setOpenError('no_root'); return; }
+    setOpenError(null);
+    void window.wmux.explorer[action](surfaceId, relPath).then(
+      (res: { code?: ExplorerErrorCode } | null) => {
+        if (res && 'error' in res) setOpenError(res.code ?? 'read_failed');
+      },
+      () => setOpenError('read_failed'),
+    );
+  }, [surfaceId]);
+
   const rootLabel = absRoot ? (absRoot.split(/[\\/]/).filter(Boolean).pop() ?? absRoot) : '';
 
   return (
@@ -218,7 +254,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
         <button
           className="explorer-panel__action"
           title={t('explorer.refresh', 'Refresh')}
-          onClick={() => { setTree({}); void fetchDir(''); }}
+          onClick={() => { setTree({}); setError(null); resetRootState(); void fetchDir(''); }}
         >{'↻'}</button>
         <button
           className="explorer-panel__action"
@@ -235,7 +271,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
       </div>
       <div className="explorer-panel__body">
         {error && (
-          <div className="explorer-panel__message">{t(`explorer.error.${error}` as any, error)}</div>
+          <div className="explorer-panel__message">{t(explorerErrorKey(error), error)}</div>
         )}
         {!error && rows.length === 0 && !loading && (
           <div className="explorer-panel__message">{t('explorer.empty', 'This folder is empty')}</div>
@@ -252,7 +288,8 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
         )}
         {truncated && (
           <div className="explorer-panel__message">
-            {t('explorer.truncated', 'Showing the first {count} entries').replace('{count}', '2000')}
+            {t('explorer.truncated', 'Showing the first {count} entries')
+              .replace('{count}', String(EXPLORER_MAX_ENTRIES))}
           </div>
         )}
         {/* A FAILED OPEN, not a failed listing: it sits under the tree and
@@ -261,7 +298,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
             `error` does would throw away the tree the user is browsing. */}
         {openError && (
           <div className="explorer-panel__message">
-            {t(`explorer.error.${openError}` as any, openError)}
+            {t(explorerErrorKey(openError), openError)}
           </div>
         )}
       </div>
@@ -279,31 +316,26 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
           >
             {t('explorer.copyPath', 'Copy path')}
           </div>
+          {/* Enabled for EVERY entry — folders and binaries included. Reveal
+              only selects the item in Explorer, and "open in the default app"
+              is the one action that is MORE useful on a file wmux cannot
+              render itself. `viewable` means "wmux can show this as text",
+              which was never the right question for either. */}
           <div
-            className={`ctx-menu__item${contextMenu.row.entry.viewable ? '' : ' ctx-menu__item--disabled'}`}
+            className="ctx-menu__item"
             role="menuitem"
-            aria-disabled={!contextMenu.row.entry.viewable}
-            onClick={() => {
-              if (!contextMenu.row.entry.viewable) return;
-              void window.wmux.markdown.reveal(absolutePathOf(contextMenu.row.relPath));
-              closeContextMenu();
-            }}
+            onClick={() => { runShellAction('reveal', contextMenu.row.relPath); closeContextMenu(); }}
           >
             {t('explorer.reveal', 'Reveal in File Explorer')}
           </div>
           <div
-            className={`ctx-menu__item${contextMenu.row.entry.viewable ? '' : ' ctx-menu__item--disabled'}`}
+            className="ctx-menu__item"
             role="menuitem"
-            aria-disabled={!contextMenu.row.entry.viewable}
-            onClick={() => {
-              if (!contextMenu.row.entry.viewable) return;
-              void window.wmux.markdown.openInApp(absolutePathOf(contextMenu.row.relPath));
-              closeContextMenu();
-            }}
+            onClick={() => { runShellAction('openInApp', contextMenu.row.relPath); closeContextMenu(); }}
           >
             {t('explorer.openInApp', 'Open in default app')}
           </div>
-          {!contextMenu.row.entry.viewable && (
+          {!contextMenu.row.entry.viewable && contextMenu.row.entry.kind === 'file' && (
             <div className="explorer-panel__ctx-hint">
               {t('explorer.notViewable', 'wmux can only open text files')}
             </div>

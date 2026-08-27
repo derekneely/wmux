@@ -972,7 +972,7 @@ app.whenReady().then(() => {
     if (cmd.command === 'report_pwd') {
       sshDetector.reportCwd(surfaceId, cmd.args[0] ?? '');
       // Second consumer of the same report: the explorer panel's tree root
-      // (docs/local/specs/2026-08-25-file-explorer-design.md).
+      //.
       reportExplorerCwd(surfaceId, cmd.args[0] ?? '');
       return;
     }

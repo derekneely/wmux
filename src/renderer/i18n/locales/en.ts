@@ -381,9 +381,12 @@ export const en = {
   'explorer.error.not_found': 'Folder not found',
   'explorer.error.not_a_directory': 'Not a folder',
   'explorer.error.binary': 'That file is not text',
+  'explorer.error.executable': 'wmux will not launch programs or scripts',
   'explorer.error.too_large': 'That file is too large to view',
   'explorer.error.denied': 'Permission denied',
   'explorer.error.read_failed': 'Could not read the folder',
+  'code.error.not_found': 'File not found',
+  'code.error.read_failed': 'Could not read that file',
   // Settings — Quick-launch profiles panel
   'settings.quickLaunch.title': 'Quick-launch profiles',
   'settings.quickLaunch.hintPart1': 'One-click tab presets shown in the ',

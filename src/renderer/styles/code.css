@@ -1,4 +1,4 @@
-/* ─── Code viewer pane (docs/local/specs/2026-08-26-code-viewer-design.md) ───
+/* ─── Code viewer pane ────────────────────────────────────────────────────────
    Mirrors markdown.css's source view rather than sharing it, matching the
    decision in CodePane.tsx's header. Theme variables only — no new colour
    literals; where a hex appears below it is copied verbatim from the
