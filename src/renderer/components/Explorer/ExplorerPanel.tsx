@@ -8,7 +8,8 @@ import {
 } from '../../../shared/types';
 import {
   flattenVisible, pathRoot, pickRootSurface, pruneExpanded, responseKey, toAbsolutePath, toggleExpanded,
-  type ExplorerRow, type ExplorerTreeState,
+  usableSticky,
+  type ExplorerRow, type ExplorerTreeState, type StickyRoot,
 } from './explorer-state';
 import { explorerErrorKey } from './explorer-errors';
 import { ExplorerTree } from './ExplorerTree';
@@ -58,18 +59,26 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
   // sticky value has to be usable on the same render that loses the terminal,
   // so the read cannot wait for an effect — but the write must, or the render
   // is impure and StrictMode's double-invoke records a pane visit twice.
-  const stickyRef = useRef<{ surfaceId: string; root: string } | null>(null);
+  //
+  // Scoped to ONE workspace, which is the whole reason it records a workspace
+  // id it could otherwise infer. A detour into a terminal-less pane is a
+  // detour within the user's current context; switching workspaces is not. A
+  // globally sticky root let a markdown-only workspace B keep listing, and
+  // revealing, workspace A's folder — and worse, a file clicked there was
+  // opened in B while `codeRootSurfaceId` recorded A's terminal, persisting a
+  // cross-workspace pointer into B's saved layout.
+  const stickyRef = useRef<StickyRoot | null>(null);
   const liveRoot = focusedSurface?.currentCwd ?? focusedSurface?.cwd ?? '';
-  const sticky = stickyRef.current;
+  const sticky = usableSticky(stickyRef.current, activeWorkspaceId);
 
   useEffect(() => {
     if (focusedPaneId && focusedSurface) {
       lastTerminalByPane.current.set(focusedPaneId, focusedSurface.id);
     }
-    if (focusedSurface && liveRoot) {
-      stickyRef.current = { surfaceId: focusedSurface.id, root: liveRoot };
+    if (activeWorkspaceId && focusedSurface && liveRoot) {
+      stickyRef.current = { workspaceId: activeWorkspaceId, surfaceId: focusedSurface.id, root: liveRoot };
     }
-  }, [focusedPaneId, focusedSurface, liveRoot]);
+  }, [activeWorkspaceId, focusedPaneId, focusedSurface, liveRoot]);
 
   const surfaceId = (focusedSurface && liveRoot ? focusedSurface.id : sticky?.surfaceId) ?? null;
   // The cwd as REPORTED by the shell. Good enough to identify a fetch, and it
@@ -152,22 +161,73 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
     }
   }, [surfaceId, root, showHidden, resetRootState]);
 
-  // Re-root whenever the focused pane, its cwd, or the hidden filter changes.
-  useEffect(() => {
+  // Which expanded folders have already been asked for under the CURRENT tree
+  // identity. Not a cache — `tree` is that — but a record of attempts, so a
+  // folder that fails to list (deleted since it was expanded, or permission
+  // denied) is asked for once per reload instead of being re-queued every time
+  // some other fetch lands and gives `tree` a new identity.
+  const requestedRef = useRef<{ key: string; paths: Set<string> }>({ key: '', paths: new Set() });
+
+  // Drop everything derived from the old tree and ask for the root again.
+  // Clearing the attempt record is part of it: a Refresh under an unchanged
+  // key must be allowed to retry the very folders that just failed, which is
+  // most of what the user is pressing the button for.
+  const reloadTree = useCallback(() => {
+    requestedRef.current = { key: '', paths: new Set() };
     setTree({});
     setError(null);
-    setSelected(null);
     resetRootState();
     if (surfaceId && root) void fetchDir('');
-  }, [surfaceId, root, showHidden, fetchDir, resetRootState]);
+  }, [surfaceId, root, fetchDir, resetRootState]);
+
+  // Re-root whenever the focused pane, its cwd, or the hidden filter changes.
+  useEffect(() => {
+    setSelected(null);
+    reloadTree();
+  }, [surfaceId, root, showHidden, reloadTree]);
+
+  // `expanded` is PERSISTED per root and `tree` is not, so the two start out
+  // disagreeing after every reload — and an expanded folder with no entry in
+  // `tree` renders as an open chevron with nothing beneath it. Refresh made
+  // that permanent: it cleared `tree`, re-fetched only the root, and left every
+  // folder the user had opened looking empty until they collapsed and reopened
+  // it by hand.
+  //
+  // So the fetching lives HERE, driven by the gap between the two, rather than
+  // in the toggle handler. Expanding a folder writes `expanded` and this effect
+  // notices; a reload clears `tree` and it notices that too. One rule, and the
+  // two states cannot drift apart again.
+  useEffect(() => {
+    if (!surfaceId || !root) return;
+    // Not until the ROOT has listed. Run in parallel with it, a child that
+    // succeeds while the root fails takes fetchDir's success path, clears
+    // `error`, and writes its entries under a tree that has no root — so a real
+    // root failure (denied, deleted, a transient IPC error) is replaced on
+    // screen by an empty tree that explains nothing. Children exist only
+    // beneath a root that listed.
+    if (!tree['']) return;
+    const key = responseKey(surfaceId, root, String(showHidden));
+    if (requestedRef.current.key !== key) requestedRef.current = { key, paths: new Set() };
+    for (const relPath of expanded) {
+      if (tree[relPath] || requestedRef.current.paths.has(relPath)) continue;
+      requestedRef.current.paths.add(relPath);
+      void fetchDir(relPath);
+    }
+  }, [expanded, tree, surfaceId, root, showHidden, fetchDir]);
 
   const handleToggleDir = useCallback((relPath: string) => {
     if (!activeWorkspaceId) return;
     const next = toggleExpanded(expanded, relPath);
+    // Re-opening a folder is a RETRY. The attempt record exists to stop the
+    // effect re-queueing a failed listing every time `tree` changes identity,
+    // not to make a failure permanent — and when the fetch lived in this
+    // handler, clicking the folder again always tried again. Without this,
+    // a folder that failed once (a network share that blinked, a transient
+    // denial) stays empty until the whole tree is refreshed.
+    if (next.includes(relPath)) requestedRef.current.paths.delete(relPath);
     const map = pruneExpanded({ ...expandedByRoot, [absRoot]: next }, absRoot, MAX_ROOTS);
     updateWorkspaceMetadata(activeWorkspaceId, { explorerExpanded: map });
-    if (next.includes(relPath) && !tree[relPath]) void fetchDir(relPath);
-  }, [activeWorkspaceId, expanded, expandedByRoot, absRoot, tree, fetchDir, updateWorkspaceMetadata]);
+  }, [activeWorkspaceId, expanded, expandedByRoot, absRoot, updateWorkspaceMetadata]);
 
   const rows = useMemo(() => flattenVisible(tree, expanded), [tree, expanded]);
 
@@ -254,7 +314,7 @@ export function ExplorerPanel({ onClose, focusedPaneId }: ExplorerPanelProps): R
         <button
           className="explorer-panel__action"
           title={t('explorer.refresh', 'Refresh')}
-          onClick={() => { setTree({}); setError(null); resetRootState(); void fetchDir(''); }}
+          onClick={reloadTree}
         >{'↻'}</button>
         <button
           className="explorer-panel__action"

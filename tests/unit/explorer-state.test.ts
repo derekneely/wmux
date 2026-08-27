@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
   joinRel, sortEntries, toggleExpanded, pruneExpanded, flattenVisible, responseKey,
-  pathRoot, toAbsolutePath, pickRootSurface,
+  pathRoot, toAbsolutePath, pickRootSurface, usableSticky,
 } from '../../src/renderer/components/Explorer/explorer-state';
 
 const dir = (name: string): any => ({ name, kind: 'dir', size: 0, mtimeMs: 0, viewable: false });
@@ -256,5 +256,27 @@ describe('code viewer wiring', () => {
       resolve(__dirname, '../../src/renderer/components/Explorer/ExplorerPanel.tsx'), 'utf-8',
     );
     expect(src).toContain('relPath: row.relPath');
+  });
+});
+
+// The sticky root exists so a detour into a terminal-less pane does not blank
+// the panel. A workspace switch is not a detour: held across one, the panel
+// lists and reveals a folder from a workspace the user has left, and a file
+// clicked there records THAT workspace's terminal as its code root.
+describe('usableSticky', () => {
+  const sticky = { workspaceId: 'ws-a', surfaceId: 'surf-1', root: 'C:\\repo' };
+
+  it('keeps a root captured in the workspace still being viewed', () => {
+    expect(usableSticky(sticky, 'ws-a')).toBe(sticky);
+  });
+
+  it('refuses a root captured in a different workspace', () => {
+    expect(usableSticky(sticky, 'ws-b')).toBeNull();
+  });
+
+  it('refuses when there is no sticky root or no active workspace', () => {
+    expect(usableSticky(null, 'ws-a')).toBeNull();
+    expect(usableSticky(sticky, null)).toBeNull();
+    expect(usableSticky(sticky, undefined)).toBeNull();
   });
 });

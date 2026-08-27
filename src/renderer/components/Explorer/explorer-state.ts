@@ -186,3 +186,32 @@ export function pickRootSurface<T extends { id: string; type: string }>(
     : undefined;
   return remembered ?? surfaces.find((s) => s.type === 'terminal') ?? null;
 }
+
+/** A root held over from a pane that had one, and the workspace it belongs to. */
+export interface StickyRoot {
+  workspaceId: string;
+  surfaceId: string;
+  root: string;
+}
+
+/**
+ * The held-over root, but only where holding it is still honest.
+ *
+ * pickRootSurface answers null for a pane with no terminal, and the panel keeps
+ * the last good root rather than blanking — a detour into a markdown-only pane
+ * should not cost the user their browsing context.
+ *
+ * A WORKSPACE switch is not that detour. Held across one, the panel lists, and
+ * reveals, a folder belonging to a workspace the user is no longer looking at;
+ * worse, a file clicked there opens in the NEW workspace while
+ * `codeRootSurfaceId` records the OLD workspace's terminal, writing a
+ * cross-workspace pointer into a layout that then restores blank. So the sticky
+ * root carries the workspace it was captured in, and is refused outside it.
+ */
+export function usableSticky(
+  sticky: StickyRoot | null,
+  activeWorkspaceId: string | null | undefined,
+): StickyRoot | null {
+  if (!sticky || !activeWorkspaceId) return null;
+  return sticky.workspaceId === activeWorkspaceId ? sticky : null;
+}
