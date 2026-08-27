@@ -265,6 +265,21 @@ interface ClosedSurface {
   cwd?: string;
   startupCommands?: string[];
   url?: string;
+  // What a `code` tab actually is. Carried so Ctrl+Shift+T reopens the FILE
+  // rather than an empty code surface — see pushClosedSurface.
+  codeFilePath?: string;
+  codeFileName?: string;
+  codeRelPath?: string;
+  codeRootSurfaceId?: SurfaceId;
+  /**
+   * Which workspace this tab was closed in. The reopen stack is GLOBAL, so
+   * Ctrl+Shift+T in workspace B can pop a tab closed in workspace A — and a
+   * code tab's root is a surface id belonging to A. Installing it in B points
+   * CodePane at another workspace's terminal, or at a dead id once A is gone:
+   * the same cross-workspace pointer the explorer's sticky root was scoped to
+   * prevent (see usableSticky in explorer-state.ts).
+   */
+  workspaceId?: WorkspaceId;
 }
 const closedSurfaceStack: ClosedSurface[] = [];
 const MAX_CLOSED_SURFACES = 25;
@@ -304,6 +319,16 @@ function pushClosedSurface(workspaceId: WorkspaceId, surface: SurfaceRef): void 
     cwd: surface.cwd,
     startupCommands: surface.startupCommands,
     url: surface.url,
+    // A code tab IS its file. Without these it reopens as a code surface with
+    // nothing to read and reports `invalid_path` — which reads as a bug rather
+    // than as the empty tab it is. `codeContent` is deliberately absent: the
+    // buffer is never persisted (see SurfaceRef.codeContent) and CodePane
+    // refills it from the path on mount.
+    codeFilePath: surface.codeFilePath,
+    codeFileName: surface.codeFileName,
+    codeRelPath: surface.codeRelPath,
+    codeRootSurfaceId: surface.codeRootSurfaceId,
+    workspaceId,
   });
   if (closedSurfaceStack.length > MAX_CLOSED_SURFACES) closedSurfaceStack.shift();
 }
@@ -630,8 +655,8 @@ export const createSurfaceSlice: StateCreator<SliceState, [], [], SurfaceSlice> 
   reopenClosedSurface(workspaceId, paneId) {
     const restored = closedSurfaceStack.pop();
     if (!restored) return null;
-    const { addSurface } = get();
-    return addSurface(workspaceId, paneId, restored.type, {
+    const { addSurface, updateSurface } = get();
+    const reopenedId = addSurface(workspaceId, paneId, restored.type, {
       ...(restored.colorScheme ? { colorScheme: restored.colorScheme } : {}),
       ...(restored.customTitle ? { customTitle: restored.customTitle } : {}),
       ...(restored.shell ? { shell: restored.shell } : {}),
@@ -639,6 +664,31 @@ export const createSurfaceSlice: StateCreator<SliceState, [], [], SurfaceSlice> 
       ...(restored.startupCommands ? { startupCommands: restored.startupCommands } : {}),
       ...(restored.url ? { url: restored.url } : {}),
     });
+    // Applied AFTER creation, the way open-preview.ts fills a code tab in:
+    // addSurface's options are the fields a NEW surface is spawned from, and a
+    // code tab's file is not one of them. Passing them there compiles — an
+    // object spread carries no excess-property check — and is silently dropped,
+    // which is how this looked fixed while Ctrl+Shift+T still gave back a blank
+    // pane.
+    if (reopenedId && restored.codeFilePath && restored.workspaceId === workspaceId) {
+      // The root must still be a surface that EXISTS. A code tab whose terminal
+      // was closed in the meantime restores an id nothing answers for, and
+      // CodePane waits on that surface's `currentCwd` before reading — a signal
+      // that will never arrive, so the tab sits blank forever with no error to
+      // explain it. Dropping the dead root turns that into `invalid_path`,
+      // which at least says something true.
+      const ws = get().workspaces.find((w) => w.id === workspaceId);
+      const rootAlive = !!restored.codeRootSurfaceId && !!ws && getAllPaneIds(ws.splitTree).some(
+        (pid) => findLeaf(ws.splitTree, pid)?.surfaces.some((s) => s.id === restored.codeRootSurfaceId),
+      );
+      updateSurface(workspaceId, paneId, reopenedId, {
+        codeFilePath: restored.codeFilePath,
+        codeFileName: restored.codeFileName,
+        codeRelPath: restored.codeRelPath,
+        ...(rootAlive ? { codeRootSurfaceId: restored.codeRootSurfaceId } : {}),
+      });
+    }
+    return reopenedId;
   },
 
   reorderSurface(workspaceId, paneId, surfaceId, newIndex) {

@@ -484,3 +484,73 @@ describe('openInPreviewTab — tab lifecycle', () => {
     expect(failure).toBe('too_large');
   });
 });
+
+describe('reopenClosedSurface', () => {
+  it('brings a closed code tab back pointing at its file', async () => {
+    const { ws, pane } = setup();
+    // `keep` promotes it out of preview — an ephemeral tab is deliberately
+    // never pushed onto the reopen stack.
+    // The REAL terminal in this pane: a root that does not resolve to a live
+    // surface is dropped on reopen, so a placeholder id would not survive.
+    const rootId = surfacesOf(ws)[0].id;
+    await openInPreviewTab(ws, pane, 'C:\\repo\\a.ts', 'a.ts', {
+      keep: true, surfaceId: rootId, relPath: 'a.ts',
+    });
+    const code = surfacesOf(ws).find((s) => s.type === 'code')!;
+    expect(code.codeRelPath).toBe('a.ts');
+    useStore.getState().closeSurface(ws, pane, code.id);
+
+    const reopenedId = useStore.getState().reopenClosedSurface(ws, pane);
+    const reopened = surfacesOf(ws).find((s) => s.id === reopenedId)!;
+    expect(reopened.type).toBe('code');
+    // Without the file it reopens as an empty code surface reporting
+    // invalid_path, which reads as a bug rather than as an empty tab.
+    expect(reopened.codeRelPath).toBe('a.ts');
+    expect(reopened.codeFilePath).toBe('C:\\repo\\a.ts');
+    expect(reopened.codeRootSurfaceId).toBe(rootId);
+    // The buffer is never persisted — CodePane refills it from the path.
+    expect(reopened.codeContent).toBeUndefined();
+  });
+
+  it('does NOT carry a code root into a different workspace', () => {
+    const { ws, pane } = setup();
+    // Closed in workspace A...
+    const codeId = useStore.getState().addSurface(ws, pane, 'code' as any, {})!;
+    useStore.getState().updateSurface(ws, pane, codeId, {
+      codeFilePath: 'C:\\repo\\a.ts', codeRelPath: 'a.ts',
+      codeRootSurfaceId: 'surf-root-in-a' as any,
+    });
+    useStore.getState().closeSurface(ws, pane, codeId);
+
+    // ...reopened in workspace B. A's terminal id means nothing here, and
+    // installing it would point CodePane at another workspace's pane.
+    const other = setup();
+    const reopenedId = useStore.getState().reopenClosedSurface(other.ws, other.pane);
+    const reopened = surfacesOf(other.ws).find((s) => s.id === reopenedId)!;
+    expect(reopened.type).toBe('code');
+    expect(reopened.codeRootSurfaceId).toBeUndefined();
+    expect(reopened.codeFilePath).toBeUndefined();
+  });
+
+  it('drops a code root whose terminal was closed before the reopen', () => {
+    const { ws, pane } = setup();
+    const rootId = surfacesOf(ws)[0].id;   // the workspace's own terminal
+    // A second terminal, so closing the root below removes a SURFACE and not
+    // the pane (and with a single-pane workspace, the workspace itself).
+    useStore.getState().addSurface(ws, pane, 'terminal' as any, {});
+    const codeId = useStore.getState().addSurface(ws, pane, 'code' as any, {})!;
+    useStore.getState().updateSurface(ws, pane, codeId, {
+      codeFilePath: 'C:\\repo\\a.ts', codeRelPath: 'a.ts', codeRootSurfaceId: rootId,
+    });
+    // The terminal the tab was rooted at goes first, so the code tab is what
+    // Ctrl+Shift+T pops (the stack is LIFO) and its root is already dead.
+    useStore.getState().closeSurface(ws, pane, rootId);
+    useStore.getState().closeSurface(ws, pane, codeId);
+    const reopenedId = useStore.getState().reopenClosedSurface(ws, pane);
+    const reopened = surfacesOf(ws).find((s) => s.id === reopenedId)!;
+    expect(reopened.codeRelPath).toBe('a.ts');
+    // A dead root id makes CodePane wait forever on a cwd that never comes.
+    // Absent, it reports invalid_path instead of sitting blank.
+    expect(reopened.codeRootSurfaceId).toBeUndefined();
+  });
+});
