@@ -45,18 +45,54 @@ export function buildDefaultSplitTree(): SplitNode {
 // buildDefaultSplitTree() used to mint fresh ids on every call, while carrying
 // every other surface field (type/shell/cwd/startupCommands/colorScheme/...)
 // through unchanged.
+//
+// Two passes rather than one, because re-minting is not the whole job: a `code`
+// surface carries `codeRootSurfaceId`, a reference to ANOTHER surface's id, and
+// spreading that through unchanged points the restored tab at a terminal from
+// the workspace the layout was captured in. That terminal is not in the new
+// workspace, so CodePane reads against a surface main will not answer for and
+// the tab comes back permanently blank. So: collect every old id with the new
+// id it will get, THEN rewrite, so a reference can be resolved no matter which
+// pane of the tree its target lives in.
 export function instantiateLayout(template: SplitNode): SplitNode {
+  const idMap = new Map<SurfaceId, SurfaceId>();
+  collectMintedIds(template, idMap);
+  return applyMintedIds(template, idMap);
+}
+
+function collectMintedIds(template: SplitNode, idMap: Map<SurfaceId, SurfaceId>): void {
+  if (template.type === 'leaf') {
+    for (const s of template.surfaces) idMap.set(s.id, `surf-${uuid()}` as SurfaceId);
+    return;
+  }
+  collectMintedIds(template.children[0], idMap);
+  collectMintedIds(template.children[1], idMap);
+}
+
+function applyMintedIds(template: SplitNode, idMap: Map<SurfaceId, SurfaceId>): SplitNode {
   if (template.type === 'leaf') {
     return {
       type: 'leaf',
       paneId: `pane-${uuid()}` as PaneId,
-      surfaces: template.surfaces.map((s) => ({ ...s, id: `surf-${uuid()}` as SurfaceId })),
+      surfaces: template.surfaces.map((s) => {
+        const next: SurfaceRef = { ...s, id: idMap.get(s.id)! };
+        if (next.codeRootSurfaceId) {
+          const root = idMap.get(next.codeRootSurfaceId);
+          // An unresolvable root means the captured tree never contained the
+          // terminal this tab was rooted at. Dropping the field is the honest
+          // outcome — CodePane reports `invalid_path` — where keeping a dead id
+          // would look like a file that failed to load for some other reason.
+          if (root) next.codeRootSurfaceId = root;
+          else delete next.codeRootSurfaceId;
+        }
+        return next;
+      }),
       activeSurfaceIndex: template.activeSurfaceIndex,
     };
   }
   return {
     ...template,
-    children: [instantiateLayout(template.children[0]), instantiateLayout(template.children[1])],
+    children: [applyMintedIds(template.children[0], idMap), applyMintedIds(template.children[1], idMap)],
   };
 }
 
@@ -271,6 +307,7 @@ export function dropEphemeralSurfaces(tree: SplitNode): SplitNode {
     // instead — the "ephemeral never persists" rule loses exactly this one
     // case, which is the cheapest of the three prices. Do not "fix" this back.
     const survivors = kept.length > 0 ? kept : tree.surfaces.slice(-1);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured to OMIT it
     const surfaces = survivors.map(({ ephemeral, ...rest }) => rest as SurfaceRef);
     const activeSurfaceIndex = Math.max(0, Math.min(tree.activeSurfaceIndex, surfaces.length - 1));
     return { ...tree, surfaces, activeSurfaceIndex };
@@ -299,6 +336,7 @@ export function dropCodeContent(tree: SplitNode): SplitNode {
       ...tree,
       surfaces: tree.surfaces.map((s) => {
         if (s.type !== 'code' || s.codeContent === undefined) return s;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured to OMIT it
         const { codeContent, ...rest } = s;
         return rest as SurfaceRef;
       }),

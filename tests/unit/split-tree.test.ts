@@ -414,6 +414,70 @@ describe('instantiateLayout', () => {
     expect(a.paneId).not.toBe(b.paneId);
     expect(a.surfaces[0].id).not.toBe(b.surfaces[0].id);
   });
+
+  // A `code` surface is the one surface that REFERS to another surface's id.
+  // Minting a fresh id for the terminal while leaving the reference pointing at
+  // the old one is not a cosmetic mismatch: CodePane reads through that id, and
+  // main answers only for a live owned surface, so the tab comes back blank in
+  // every workspace ever made from the layout.
+  it('remaps a code tab root to the terminal it was minted alongside', () => {
+    const template = createLeaf('pane-tpl' as any, 'terminal') as any;
+    const terminalId = template.surfaces[0].id;
+    template.surfaces.push({
+      id: 'surf-code-tpl',
+      type: 'code',
+      title: 'main.ts',
+      codeRelPath: 'src/main.ts',
+      codeFilePath: 'C:\\proj\\src\\main.ts',
+      codeRootSurfaceId: terminalId,
+    });
+
+    const result = instantiateLayout(template) as any;
+    const [terminal, code] = result.surfaces;
+    expect(terminal.id).not.toBe(terminalId);
+    expect(code.id).not.toBe('surf-code-tpl');
+    expect(code.codeRootSurfaceId).toBe(terminal.id);
+    // The path fields are what the tab re-reads from — they must survive.
+    expect(code.codeRelPath).toBe('src/main.ts');
+    expect(code.codeFilePath).toBe('C:\\proj\\src\\main.ts');
+  });
+
+  it('resolves a code tab root that lives in a different pane of the template', () => {
+    let template: any = createLeaf('pane-a' as any, 'terminal');
+    template = splitNode(template, 'pane-a' as any, 'pane-b' as any, 'terminal', 'vertical');
+    const terminalId = template.children[0].surfaces[0].id;
+    template.children[1].surfaces.push({
+      id: 'surf-code-tpl',
+      type: 'code',
+      title: 'main.ts',
+      codeRelPath: 'src/main.ts',
+      codeRootSurfaceId: terminalId,
+    });
+
+    const result = instantiateLayout(template) as any;
+    const newTerminalId = result.children[0].surfaces[0].id;
+    const code = result.children[1].surfaces[1];
+    expect(newTerminalId).not.toBe(terminalId);
+    expect(code.codeRootSurfaceId).toBe(newTerminalId);
+  });
+
+  it('drops a code tab root the template never contained', () => {
+    const template = createLeaf('pane-tpl' as any, 'terminal') as any;
+    template.surfaces.push({
+      id: 'surf-code-tpl',
+      type: 'code',
+      title: 'main.ts',
+      codeRelPath: 'src/main.ts',
+      codeRootSurfaceId: 'surf-from-another-workspace',
+    });
+
+    const result = instantiateLayout(template) as any;
+    const code = result.surfaces[1];
+    // Absent, not carried through as a dead id: CodePane reports invalid_path
+    // rather than reading against a surface that was never in this tree.
+    expect('codeRootSurfaceId' in code).toBe(false);
+    expect(code.codeRootSurfaceId).toBeUndefined();
+  });
 });
 
 describe('dropEphemeralSurfaces', () => {
