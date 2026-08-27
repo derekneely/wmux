@@ -263,6 +263,19 @@ describe('isExecutablePath', () => {
     }
   });
 
+  it('refuses files whose DEFAULT VERB executes what they contain or point at', async () => {
+    const { isExecutablePath } = await import('../../src/main/explorer-fs');
+    // The group that names no interpreter and is not a program, so reading the
+    // list extension-by-extension never reaches it: Windows hands each of these
+    // to a component that runs its contents or fetches its target.
+    for (const name of ['help.chm', 'launch.appref-ms', 'setup.application', 'fix.diagcab',
+                        'addin.xll', 'query.iqy', 'comp.wsc', 'comp.sct',
+                        'thing.settingcontent-ms', 'share.library-ms', 'link.website',
+                        'driver.inf', 'pkg.msix', 'pkg.appinstaller', 'archive.pyz']) {
+      expect(isExecutablePath(name), name).toBe(true);
+    }
+  });
+
   it('allows ordinary source and data files', async () => {
     const { isExecutablePath } = await import('../../src/main/explorer-fs');
     for (const name of ['index.ts', 'main.rs', 'App.tsx', 'README.md', 'data.json',

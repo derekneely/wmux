@@ -80,9 +80,23 @@ export const EXEC_EXT: ReadonlySet<string> = new Set([
   '.exe', '.com', '.scr', '.msi', '.msp', '.cpl', '.dll',
   '.bat', '.cmd', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh',
   '.hta', '.reg', '.lnk', '.pif', '.url', '.scf', '.jar', '.msc',
+  '.msix', '.appx', '.appinstaller', '.msu',
   // Scripts whose association is an interpreter on a developer's machine.
-  '.py', '.pyw', '.rb', '.pl', '.php', '.lua', '.tcl', '.ahk',
+  '.py', '.pyw', '.pyz', '.pyzw', '.rb', '.pl', '.php', '.lua', '.tcl', '.ahk', '.au3',
   '.sh', '.bash', '.zsh', '.fish',
+  // The third group, and the one an extension-by-extension reading of the
+  // second will never reach: files that are not programs and name no
+  // interpreter, but whose DEFAULT VERB hands them to a Windows component that
+  // then executes what they contain or point at. `.chm` opens in hh.exe;
+  // `.appref-ms` and `.application` are ClickOnce and fetch their payload from
+  // a URL inside the file; `.diagcab` runs through msdt (the `ms-msdt:`
+  // PROTOCOL was disabled in 2022, this file type was not); `.xll` is a DLL
+  // Excel loads; `.wsc`/`.sct` are script components; `.library-ms`,
+  // `.searchConnector-ms` and `.website` can name a WebDAV or UNC target and
+  // leak credentials to it without executing anything locally at all.
+  '.chm', '.appref-ms', '.application', '.diagcab', '.xll', '.iqy',
+  '.wsc', '.sct', '.ws', '.settingcontent-ms',
+  '.library-ms', '.searchconnector-ms', '.website', '.inf',
 ]);
 
 /** True when the shell must not be asked to open this name. */
