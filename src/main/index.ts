@@ -1119,7 +1119,9 @@ app.whenReady().then(() => {
     if (cmd.command === 'report_pwd') {
       sshDetector.reportCwd(surfaceId, cmd.args[0] ?? '');
       // Second consumer of the same report: the explorer panel's tree root
-      //.
+      // resolves from the cwd a shell declares, the same one ssh-detect reads.
+      // One report, two readers — not two mechanisms that can disagree about
+      // where a pane is.
       reportExplorerCwd(surfaceId, cmd.args[0] ?? '');
       return;
     }

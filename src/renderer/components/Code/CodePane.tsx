@@ -67,7 +67,15 @@ export function CodePane({ surfaceId }: { surfaceId: SurfaceId }): React.JSX.Ele
   // why a file deleted since the last session shows not_found rather than a
   // stale ghost of itself.
   useEffect(() => {
-    if (content !== undefined) return;      // already loaded this session
+    // Content already present, so there is nothing to read — but the error from
+    // a PREVIOUS file must not outlive it. open-preview.ts writes `codeContent`
+    // straight into the store when it recycles this pane's preview tab, and
+    // this component is not remounted for that, so this effect is the only
+    // thing that ever clears `error` — and it used to return before doing so.
+    // A tab that had failed (binary, too large, deleted) then went on showing
+    // that failure over the next file's perfectly good content, because the
+    // render checks `error` before it checks `content`.
+    if (content !== undefined) { setError(null); return; }
     if (!relPath || !rootSurfaceId) { setError('invalid_path'); return; }
     if (!rootCwd) return;                   // root not reported yet — see above
     let cancelled = false;
