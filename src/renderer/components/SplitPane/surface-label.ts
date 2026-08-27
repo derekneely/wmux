@@ -56,6 +56,8 @@ export function getSurfaceLabel(
     case 'code':
       // No dirty marker: a code surface is read-only by construction.
       return surface.codeFileName || t('surfaceLabel.code', 'Code');
+    case 'prompts':
+      return t('surfaceLabel.prompts', 'Prompts');
     default:
       return t('surfaceLabel.tab', 'Tab');
   }
