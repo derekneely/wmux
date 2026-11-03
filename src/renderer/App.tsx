@@ -169,6 +169,9 @@ function applyUserConfigWorkspace(state: any, workspace: any): void {
   // same pref block. 0 is a legitimate value — it means "never" — so the guard
   // is on the TYPE, not on truthiness.
   if (typeof workspace.snapshotMinutes === 'number') patch.sessionSnapshotMinutes = workspace.snapshotMinutes;
+  // `default-shell`: '' is a real answer (System default), so the guard is on
+  // the type here too.
+  if (typeof workspace.defaultShell === 'string') patch.defaultShell = workspace.defaultShell;
   // Keep-awake is MAIN's state (issue #363): pushed there, never into the
   // store. Main persists it and tells every window.
   if (workspace.keepAwake?.mode) {

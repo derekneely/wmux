@@ -94,6 +94,8 @@ contextBridge.exposeInMainWorld('wmux', {
     toggleDevTools: () => ipcRenderer.send('toggle-devtools'),
     zoom: (deltaY: number) => ipcRenderer.send(IPC_CHANNELS.WINDOW_ZOOM, deltaY),
     pickFolder: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_PICK_FOLDER),
+    pickShell: (): Promise<{ path?: string; canceled?: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_PICK_SHELL),
     // Restart Explorer with its icon cache cleared (issues #137/#226). Main
     // puts up the confirm itself — the dialog names the cost (File Explorer
     // windows close) and the renderer cannot be trusted to have said it.

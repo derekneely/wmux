@@ -79,6 +79,8 @@ panes  = 3         # 1-8 terminal panes
 layout = "grid"    # grid | columns | rows | left | down | single
 # Snapshot the live layout this often, as an "Auto-save …" session. 0 = never.
 snapshot-minutes = 5
+# Shell a new terminal starts (see "Default shell" below). "" = System default.
+default-shell = 'C:\Users\me\AppData\Local\Programs\nu\bin\nu.exe'
 
 [workspace.keep-awake]
 # Keep Windows from sleeping (see "Keep awake" below).
@@ -133,6 +135,31 @@ says so. Before 2.8.0 the sidebar `+` always made three panes and
 `wmux new-workspace` always made one — both now follow this setting, and
 `wmux new-workspace --panes 1 --layout single` pins the old CLI shape for a
 script that depends on it.
+
+## Default shell
+
+`default-shell` in `[workspace]` is Settings → Workspace → *Default shell*, for
+any shell — including ones the dropdown has no entry for, like Nushell, a
+portable pwsh or an MSYS2 zsh:
+
+```toml
+[workspace]
+default-shell = 'C:\Users\me\AppData\Local\Programs\nu\bin\nu.exe'
+# or a command line: '"C:\Tools\my shell.exe" --login'
+```
+
+Use a TOML literal string (single quotes) so the backslashes stay as written.
+The value is an executable path, a name on PATH (`pwsh.exe`), or a command line
+with arguments; `""` means System default. It is used wherever nothing more
+specific names a shell — a workspace, a saved layout's pane or a restored
+session keeps its own. A shell wmux cannot find falls back to the system
+default, and the pane says so. Shell integration (directory tracking, agent
+status) is only installed for PowerShell, Command Prompt, bash and WSL; any
+other shell runs without it.
+
+When this key is present it is applied at every startup and reload, over what
+was picked in the UI. The same choice is available without the file: pick
+*Custom…* in the dropdown and type the path or use *Browse…*.
 
 ## Keep awake
 

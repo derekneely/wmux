@@ -682,6 +682,11 @@ export const en = {
   'settings.workspacePanel.shellSection': 'Shell',
   'settings.workspacePanel.defaultShell': 'Default shell',
   'settings.workspacePanel.shell.systemDefault': 'System default',
+  'settings.workspacePanel.shell.custom': 'Custom…',
+  'settings.workspacePanel.customShell': 'Custom shell',
+  'settings.workspacePanel.customShellPlaceholder': 'C:\\path\\to\\shell.exe --args',
+  'settings.workspacePanel.customShellHint':
+    'An executable path, a name on PATH, or a command line with arguments — quote the path if it has spaces and arguments follow it. A shell wmux cannot find falls back to the system default with a notice in the pane. Shell integration (directory tracking, agent status) is only installed for PowerShell, Command Prompt, bash and WSL.',
   'settings.workspacePanel.defaultCwd': 'Starting directory',
   'settings.workspacePanel.defaultCwdPlaceholder': 'Current directory (e.g. ~\\projects)',
   'settings.workspacePanel.browse': 'Browse…',

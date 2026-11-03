@@ -88,12 +88,52 @@ function PaneCommandGroup({
   );
 }
 
+/**
+ * The Default shell dropdown's fixed entries. Anything else stored in
+ * `defaultShell` — a hand-edited settings.json, `[workspace] default-shell` in
+ * config.toml, or a path typed under Custom… — is shown as Custom with its
+ * value in the field, never as a preset it is not. Matched case-insensitively
+ * because Windows names are, so `PWSH.EXE` from a config file is still the
+ * PowerShell Core entry.
+ */
+const SHELL_PRESETS = ['', 'powershell.exe', 'pwsh.exe', 'cmd.exe', 'bash.exe', 'wsl.exe'] as const;
+const CUSTOM_SHELL = 'custom';
+
+function presetFor(shell: string): string | undefined {
+  const lower = shell.trim().toLowerCase();
+  return SHELL_PRESETS.find((p) => p === lower);
+}
+
 export default function WorkspaceSettings() {
   const t = useT();
   const {
     workspacePrefs, setWorkspacePrefs,
     savedLayouts, setSavedLayouts, requestLayoutSave, updateLayoutFromCurrent,
   } = useStore();
+  // Picking Custom… must not change the stored shell — until something is
+  // typed or browsed, the old choice is still what a new pane gets — so the
+  // dropdown holds "Custom is open" itself. A stored non-preset value is
+  // Custom whatever this says.
+  const [customShellOpen, setCustomShellOpen] = useState(false);
+  const shellPreset = presetFor(workspacePrefs.defaultShell);
+  const shellIsCustom = customShellOpen || shellPreset === undefined;
+  const customShellValue = shellPreset === undefined ? workspacePrefs.defaultShell : '';
+  const chooseShell = (value: string) => {
+    if (value === CUSTOM_SHELL) {
+      setCustomShellOpen(true);
+      return;
+    }
+    setCustomShellOpen(false);
+    setWorkspacePrefs({ defaultShell: value });
+  };
+  const pickCustomShell = () => {
+    void (async () => {
+      const res = await window.wmux?.system?.pickShell?.();
+      if (!res || res.canceled || !res.path) return;
+      setCustomShellOpen(true);
+      setWorkspacePrefs({ defaultShell: res.path });
+    })();
+  };
   // Keep-awake lives in main (issue #363), not in workspacePrefs.
   const keepAwake = useKeepAwake();
   // Which layout id was just overwritten, for a transient "Saved" confirmation
@@ -456,8 +496,8 @@ export default function WorkspaceSettings() {
         <label className="settings-label">{t('settings.workspacePanel.defaultShell', 'Default shell')}</label>
         <select
           className="settings-select"
-          value={workspacePrefs.defaultShell}
-          onChange={(e) => setWorkspacePrefs({ defaultShell: e.target.value })}
+          value={shellIsCustom ? CUSTOM_SHELL : shellPreset}
+          onChange={(e) => chooseShell(e.target.value)}
         >
           <option value="">{t('settings.workspacePanel.shell.systemDefault', 'System default')}</option>
           <option value="powershell.exe">PowerShell</option>
@@ -465,8 +505,34 @@ export default function WorkspaceSettings() {
           <option value="cmd.exe">Command Prompt</option>
           <option value="bash.exe">Git Bash</option>
           <option value="wsl.exe">WSL</option>
+          <option value={CUSTOM_SHELL}>{t('settings.workspacePanel.shell.custom', 'Custom…')}</option>
         </select>
       </div>
+      {shellIsCustom && (
+        <>
+          <div className="settings-row">
+            <label className="settings-label">{t('settings.workspacePanel.customShell', 'Custom shell')}</label>
+            <input
+              type="text"
+              className="settings-input"
+              data-testid="custom-shell-input"
+              value={customShellValue}
+              onChange={(e) => setWorkspacePrefs({ defaultShell: e.target.value })}
+              placeholder={t('settings.workspacePanel.customShellPlaceholder', 'C:\\path\\to\\shell.exe --args')}
+              spellCheck={false}
+            />
+            <button className="settings-button" data-testid="custom-shell-browse" onClick={pickCustomShell}>
+              {t('settings.workspacePanel.browse', 'Browse…')}
+            </button>
+          </div>
+          <p className="settings-hint">
+            {t(
+              'settings.workspacePanel.customShellHint',
+              'An executable path, a name on PATH, or a command line with arguments — quote the path if it has spaces and arguments follow it. A shell wmux cannot find falls back to the system default with a notice in the pane. Shell integration (directory tracking, agent status) is only installed for PowerShell, Command Prompt, bash and WSL.',
+            )}
+          </p>
+        </>
+      )}
 
       <div className="settings-row">
         <label className="settings-label">{t('settings.workspacePanel.defaultCwd', 'Starting directory')}</label>

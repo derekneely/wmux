@@ -124,6 +124,12 @@ export interface UserConfig {
      * in minutes; `0` switches it off (issue #238).
      */
     snapshotMinutes?: number;
+    /**
+     * Shell a new terminal starts when nothing more specific names one: an
+     * executable path, a bare name on PATH, or a command line with arguments
+     * (the grammar `parseShellSpec` reads). `''` is System default.
+     */
+    defaultShell?: string;
     keepAwake?: {
       mode?: 'smart' | 'always' | 'off';
       preventDisplaySleep?: boolean;
@@ -501,6 +507,19 @@ function mapWorkspaceSection(root: TomlTable, errors: string[]): NonNullable<Use
       }
       out.snapshotMinutes = clamped;
     }
+  }
+
+  // `default-shell`: the Settings → Workspace → Default shell value, which the
+  // dropdown cannot express for a shell outside its presets (Nushell, a
+  // portable pwsh, MSYS2 zsh). Taken as written — the main process resolves
+  // and, if it cannot, falls back with a notice in the pane (#252) — so the
+  // only thing checked here is that it is text. An empty string is kept: it
+  // is how a config file says "System default" over a choice made in the UI.
+  const shellRaw = workspace['default-shell'] ?? workspace.defaultShell;
+  if (shellRaw !== undefined) {
+    const shell = asString(shellRaw);
+    if (shell === undefined) errors.push('workspace.default-shell: expected a string');
+    else out.defaultShell = shell.trim();
   }
 
   const keepAwake = mapKeepAwake(workspace, errors);

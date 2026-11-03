@@ -1845,6 +1845,25 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     }
     return { path: result.filePaths[0] };
   });
+
+  // Settings → Workspace → Default shell → Custom… → Browse. Only hands back
+  // the path the user chose; nothing is read or run here — the pick is stored
+  // as the default-shell spec and resolved when the next pane spawns.
+  ipcMain.handle(IPC_CHANNELS.SYSTEM_PICK_SHELL, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const result = await dialog.showOpenDialog(win as BrowserWindow, {
+      title: 'Choose Default Shell',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Programs', extensions: ['exe'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    return { path: result.filePaths[0] };
+  });
 }
 
 /**
